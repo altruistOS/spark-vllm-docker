@@ -146,34 +146,6 @@ For periodic maintenance, I recommend using a filter: `docker builder prune --fi
 
 ## CHANGELOG
 
-### 2026-08-01
-
-#### DeepSeek V4 Flash 0731 DSpark Recipe
-
-Added `recipes/deepseek-v4-flash-dspark-0731.yaml`, a cluster-only recipe for serving
-`deepseek-ai/DeepSeek-V4-Flash-0731` on 2x DGX Spark (TP=2) with the DSpark speculative
-decoder, NVFP4 DS-MLA KV cache, and 1M-token context. It mirrors the Anemll `0.1.1`
-serving profile (MTP-5, probabilistic speculation, prefix caching, chunked prefill,
-`deepseek_v4` tokenizer/reasoning/tool parsers) and retains the regular CUDA graph path
-via `VLLM_USE_BREAKABLE_CUDAGRAPH=0`.
-
-Unlike the earlier `deepseek-v4-flash-dspark-nvfp4.yaml` (preview `DeepSeek-V4-Flash-DSpark`),
-the 0731 recipe sets `mtp_num_tokens: 5`, `gpu_memory_utilization: 0.80`, and the cudagraph
-capture size to `36` (`max_num_seqs * (mtp + 1) = 6 * 6`) per the upstream launch formula.
-
-Run it on a 2-node cluster without Ray:
-
-```bash
-# Download the model once and distribute it across the cluster
-./hf-download.sh deepseek-ai/DeepSeek-V4-Flash-0731 -c --copy-parallel
-
-# Launch via the recipe (no-ray mode uses PyTorch distributed backend)
-./run-recipe.sh deepseek-v4-flash-dspark-0731 --no-ray --port 8888
-```
-
-An equivalent `--launch-script` example is available at
-`examples/deepseek-v4-flash-dspark-0731.sh` for direct use with `launch-cluster.sh`.
-
 ### 2026-07-30
 
 #### Inkling Small NVFP4 support

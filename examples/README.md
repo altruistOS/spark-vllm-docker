@@ -141,23 +141,6 @@ sglang launch meta-llama/Llama-3.1-8B-Instruct \
     --tp 2
 ```
 
-### Cluster: DeepSeek V4 Flash 0731 DSpark
-
-`deepseek-v4-flash-dspark-0731.sh` is a cluster-only launch script for serving
-`deepseek-ai/DeepSeek-V4-Flash-0731` on 2x DGX Spark (TP=2). It mirrors
-`recipes/deepseek-v4-flash-dspark-0731.yaml` and omits
-`--distributed-executor-backend mp` because `launch-cluster.sh` injects the
-multi-node arguments (`--nnodes --node-rank --master-addr --master-port`).
-
-```bash
-./launch-cluster.sh --launch-script deepseek-v4-flash-dspark-0731.sh -d
-```
-
-The 0731 script sets `mtp_num_tokens: 5`, `gpu_memory_utilization: 0.80`, and
-`--max-cudagraph-capture-size 36` (`max_num_seqs * (mtp + 1)`), matching the
-upstream two-Spark serving profile. Retains the regular CUDA graph path via
-`VLLM_USE_BREAKABLE_CUDAGRAPH=0`.
-
 ### With Model Requiring Patches
 
 If your model requires patches, use `--apply-mod` alongside `--launch-script`:

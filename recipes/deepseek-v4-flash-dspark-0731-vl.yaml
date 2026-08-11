@@ -1,0 +1,70 @@
+# Recipe: DeepSeek-V4-Flash-0731 — VL sidecar (Qwen3-VL-4B)
+#
+# Independent vision sidecar to pair with deepseek-v4-flash-dspark-0731.yaml.
+# DeepSeek-V4-Flash-0731 is text-only; this recipe serves Qwen3-VL-4B-AWQ as a
+# separate vLLM instance (port 8889) that agents reach for image input.
+#
+# Adapted from DeepSeek-v4-Flash-DSpark-2x-DGX-Spark docker-compose.vl-sidecar.yml,
+# translated onto eugr's launch-cluster.sh single-container recipe surface.
+# Because eugr runs one container per recipe, run this recipe as a SECOND,
+# separately-named container AFTER the main 0731 recipe is up.
+#
+# Prerequisites (do once on ALL nodes):
+#   docker pull ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+#   huggingface-cli download cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit
+#
+# IMPORTANT: HF_HOME caveat (same as main recipe) — eugr mounts the host HF cache
+# to /root/.cache/huggingface inside the container.
+#
+# Usage (run AFTER the 0731 recipe, with its OWN --name and --master-port):
+#   ./run-recipe.sh deepseek-v4-flash-dspark-0731-vl --no-ray \
+#       --port 8889 --master-port 25100 --name vllm-vl
+
+recipe_version: "1"
+name: DeepSeek-V4-Flash-DSpark-0731-VL
+description: Qwen3-VL-4B AWQ vision sidecar (TP=2) on 2x DGX Spark, pairs with the 0731 text recipe
+
+model: cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit
+container: ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+cluster_only: true
+mods: []
+
+defaults:
+  port: 8889
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.04
+  max_model_len: 32768
+  max_num_seqs: 4
+  max_num_batched_tokens: 2048
+  served_model_name: qwen3-vl-4b
+
+env:
+  # Path: match eugr's default mount ($HF_CACHE_DIR -> /root/.cache/huggingface)
+  HF_HOME: "/root/.cache/huggingface"
+  # Offline: model weights pre-downloaded; no online fetch at runtime
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  # VLLM memory check off (4-bit small VL on a shared-card budget)
+  VLLM_SKIP_INIT_MEMORY_CHECK: "1"
+
+command: |
+  vllm serve cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit \
+    --served-model-name {served_model_name} \
+    --trust-remote-code \
+    --port {port} \
+    --host {host} \
+    --tensor-parallel-size {tensor_parallel} \
+    --pipeline-parallel-size 1 \
+    --distributed-executor-backend mp \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --kv-cache-dtype int4_per_token_head \
+    --attention-backend TRITON_ATTN \
+    --no-enable-flashinfer-autotune \
+    --disable-custom-all-reduce \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
+    --limit-mm-per-prompt '{{"image":4}}'

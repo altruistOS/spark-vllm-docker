@@ -6,7 +6,7 @@
 # OpenAI image_url processor. No Qwen3-VL sidecar needed.
 #
 # Model weights must already be cached on ALL nodes (HF_HUB_OFFLINE=1 at serve):
-#   hf download deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+#   hf download deepseek-ai/DeepSeek-V4-Flash-Vision-Exp   # uses cached refs/main (no hard revision pin, offline-safe)
 # Served model name differs from the text recipe -> use image_url in user
 # messages only; no video (GIF decodes as a still frame).
 #
@@ -36,7 +36,6 @@ defaults:
   mtp_num_tokens: 6
   cudagraph_capture_size: 42
   served_model_name: deepseek-v4-flash-vision-exp
-  revision: 86f746b36186f0e567729a5c06a8c918caba82a9
 
 env:
   HF_HOME: "/root/.cache/huggingface"
@@ -46,11 +45,9 @@ env:
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
-  DSPARK_REVISION: "86f746b36186f0e567729a5c06a8c918caba82a9"
 
 command: |
   vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
-    --revision {revision} \
     --served-model-name {served_model_name} \
     --trust-remote-code \
     --port {port} \

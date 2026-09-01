@@ -1,0 +1,83 @@
+# Recipe: DeepSeek-V4-Flash-Vision-Exp (DSpark, native vision on Anemll)
+#
+# Native multimodal DeepSeek V4 Flash Vision-Exp on 2x DGX Spark via the
+# Anemll dspark-vllm-gx10:0.1.1 image: NVFP4 DS-MLA KV + DSpark speculative
+# decoding + a startup hotfix that loads the ViT/Aligner and registers the
+# OpenAI image_url processor. No Qwen3-VL sidecar needed.
+#
+# Model weights must already be cached on ALL nodes (HF_HUB_OFFLINE=1 at serve):
+#   hf download deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+# Served model name differs from the text recipe -> use image_url in user
+# messages only; no video (GIF decodes as a still frame).
+#
+# Usage:
+#   ./run-recipe.sh deepseek-v4-flash-vision-dspark --no-ray --port 8888 -d
+#   (both nodes need the same image + HF cache; vision mod runs on every node)
+
+recipe_version: "1"
+name: DeepSeek-V4-Flash-DSpark-Vision-Exp
+description: DeepSeek V4 Flash Vision-Exp with NVFP4 DS-MLA KV + DSpark native image support on 2x DGX Spark
+
+model: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+container: ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+cluster_only: true
+mods:
+  - mods/drop-caches
+  - mods/dsv4-vision-exp
+
+defaults:
+  port: 8888
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.80
+  max_model_len: 1048576
+  max_num_seqs: 6
+  max_num_batched_tokens: 8192
+  mtp_num_tokens: 6
+  cudagraph_capture_size: 42
+  served_model_name: deepseek-v4-flash-vision-exp
+  revision: 86f746b36186f0e567729a5c06a8c918caba82a9
+
+env:
+  HF_HOME: "/root/.cache/huggingface"
+  HF_HUB_OFFLINE: "1"
+  VLLM_USE_FLASHINFER_SAMPLER: "1"
+  VLLM_USE_B12X_MOE: "1"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  DSPARK_REVISION: "86f746b36186f0e567729a5c06a8c918caba82a9"
+
+command: |
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --revision {revision} \
+    --served-model-name {served_model_name} \
+    --trust-remote-code \
+    --port {port} \
+    --host {host} \
+    --tensor-parallel-size {tensor_parallel} \
+    --pipeline-parallel-size 1 \
+    --kv-cache-dtype nvfp4_ds_mla \
+    --block-size 256 \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --long-prefill-token-threshold 1024 \
+    --max-cudagraph-capture-size {cudagraph_capture_size} \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \
+    --limit-mm-per-prompt '{{"image":8}}' \
+    --distributed-executor-backend mp \
+    --moe-backend flashinfer_b12x \
+    --attention-backend flashinfer \
+    --enable-flashinfer-autotune \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --reasoning-config '{{"reasoning_parser":"deepseek_v4","reasoning_start_str":" thinking","reasoning_end_str":" response"}}' \
+    --default-chat-template-kwargs '{{"thinking":false}}' \
+    --generation-config vllm

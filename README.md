@@ -174,30 +174,6 @@ dual (or more) DGX Spark cluster. They use the Anemll `dspark-vllm-gx10` image
 backend. On all nodes you must have passwordless SSH between the head and the
 workers, and the same container image plus the HF model cache present.
 
-### DeepSeek-V4-Flash-0731 (DSpark)
-
-Serves `deepseek-ai/DeepSeek-V4-Flash-0731` with NVFP4 DS-MLA KV and DSpark
-speculative decoding on 2x DGX Spark.
-
-1. Pull the MiaAI-Lab-specified container image on every node:
-
-```bash
-docker pull ghcr.io/anemll/dspark-vllm-gx10:0.1.1
-```
-
-2. Download and distribute the model (run from the head node; `-c` copies to
-the cluster):
-
-```bash
-./hf-download.sh deepseek-ai/DeepSeek-V4-Flash-0731 -c
-```
-
-3. Deploy with the `deepseek-v4-flash-dspark-0731` recipe (applies `mods/drop-caches`):
-
-```bash
-./run-recipe.sh deepseek-v4-flash-dspark-0731 --no-ray --port 8888
-```
-
 ### DeepSeek-V4-Flash-Vision-Exp
 
 Native multimodal build on the same Anemll image. It wires the 32-layer ViT +
@@ -226,6 +202,30 @@ by the mod's `run.sh` on every node):
 
 ```bash
 ./run-recipe.sh deepseek-v4-flash-vision-dspark --no-ray --port 8888 -d
+```
+
+### DeepSeek-V4-Flash-0731 (DSpark)
+
+Serves `deepseek-ai/DeepSeek-V4-Flash-0731` with NVFP4 DS-MLA KV and DSpark
+speculative decoding on 2x DGX Spark.
+
+1. Pull the MiaAI-Lab-specified container image on every node:
+
+```bash
+docker pull ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+```
+
+2. Download and distribute the model (run from the head node; `-c` copies to
+the cluster):
+
+```bash
+./hf-download.sh deepseek-ai/DeepSeek-V4-Flash-0731 -c
+```
+
+3. Deploy with the `deepseek-v4-flash-dspark-0731` recipe (applies `mods/drop-caches`):
+
+```bash
+./run-recipe.sh deepseek-v4-flash-dspark-0731 --no-ray --port 8888
 ```
 
 ## CHANGELOG

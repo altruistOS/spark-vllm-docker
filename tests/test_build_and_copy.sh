@@ -175,6 +175,20 @@ run_build() {
     ) > "$OUTPUT_LOG" 2>&1
 }
 
+create_local_vllm_source() {
+    LOCAL_VLLM_SOURCE_DIR="$CASE_DIR/local-vllm"
+    mkdir -p "$LOCAL_VLLM_SOURCE_DIR"
+    git -C "$LOCAL_VLLM_SOURCE_DIR" init -q
+    git -C "$LOCAL_VLLM_SOURCE_DIR" config user.name "Build Test"
+    git -C "$LOCAL_VLLM_SOURCE_DIR" config user.email "build-test@example.invalid"
+    git -C "$LOCAL_VLLM_SOURCE_DIR" config commit.gpgsign false
+    printf '[build-system]\nrequires = []\n' > "$LOCAL_VLLM_SOURCE_DIR/pyproject.toml"
+    git -C "$LOCAL_VLLM_SOURCE_DIR" add pyproject.toml
+    git -C "$LOCAL_VLLM_SOURCE_DIR" commit -q -m "local vLLM fixture"
+    git -C "$LOCAL_VLLM_SOURCE_DIR" branch -M qwen38next
+    LOCAL_VLLM_SOURCE_COMMIT=$(git -C "$LOCAL_VLLM_SOURCE_DIR" rev-parse HEAD)
+}
+
 assert_log_contains() {
     local pattern="$1"
     if ! grep -Eq "$pattern" "$TEST_LOG"; then
@@ -317,6 +331,15 @@ test_use_wheels_uses_wheel_build() {
     assert_log_contains '^docker build -t vllm-node '
     assert_log_contains 'NCCL_NVCC_GENCODE=-gencode=arch=compute_121,code=sm_121'
     pass "--use-wheels builds only the runner from precompiled wheels"
+}
+
+test_regular_build_includes_b12x_package() {
+    setup_fixture
+    run_build --use-wheels || fail "regular B12X package run failed"
+    assert_log_contains '^docker build -t vllm-node .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/regular .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
+    assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/vllm-project/vllm ref main\.'
+    pass "regular upstream vLLM builds include the B12X package"
 }
 
 test_use_wheels_never_falls_back_to_source() {
@@ -511,9 +534,78 @@ test_custom_vllm_repo_forces_source_build() {
     assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=main --build-arg VLLM_REPO=https://github.com/example/vllm.git --build-arg VLLM_APPLY_PRESET_PRS=0'
     assert_log_contains '^docker build -t vllm-node .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/custom '
     assert_log_not_contains 'B12X_REPO='
+    assert_log_not_contains 'VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
     assert_output_contains 'Rebuilding vLLM wheels \(--vllm-repo specified\)\.\.\.'
     assert_output_contains 'Skipping preset vLLM PRs because --vllm-repo, --vllm-ref, or --apply-vllm-pr was specified\.'
     pass "--vllm-repo forces a source build and suppresses upstream preset PRs"
+}
+
+test_local_vllm_source_builds_selected_ref() {
+    setup_fixture
+    create_local_vllm_source
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" --vllm-ref qwen38next || \
+        fail "--vllm-source-dir run failed"
+    assert_log_not_contains '^docker pull eugr/spark-vllm:latest$'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=qwen38next --build-arg VLLM_REPO=local-source .*--build-context vllm_source=.*/spark-vllm-source\.[^/]+/vllm --build-arg VLLM_SOURCE_MODE=local --build-arg VLLM_SOURCE_COMMIT='"$LOCAL_VLLM_SOURCE_COMMIT"
+    assert_log_contains '^docker build -t vllm-node .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/custom '
+    assert_log_not_contains 'B12X_REPO='
+    assert_output_contains 'Using clean local vLLM source at commit '"$LOCAL_VLLM_SOURCE_COMMIT"'\.'
+    assert_output_contains 'Rebuilding vLLM wheels \(--vllm-source-dir specified\)\.\.\.'
+    assert_output_contains 'Skipping preset vLLM PRs because --vllm-source-dir was specified\.'
+    if grep -Fq "$LOCAL_VLLM_SOURCE_DIR" "$OUTPUT_LOG"; then
+        fail "local source path leaked into build output"
+    fi
+    if [ "$(git -C "$LOCAL_VLLM_SOURCE_DIR" branch --show-current)" != "qwen38next" ] || \
+       [ -n "$(git -C "$LOCAL_VLLM_SOURCE_DIR" status --porcelain)" ]; then
+        fail "local source checkout was modified by the build wrapper"
+    fi
+    pass "--vllm-source-dir stages and builds the selected local ref"
+}
+
+test_local_vllm_source_defaults_to_head() {
+    setup_fixture
+    create_local_vllm_source
+    run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" || \
+        fail "--vllm-source-dir HEAD run failed"
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF='"$LOCAL_VLLM_SOURCE_COMMIT"' --build-arg VLLM_REPO=local-source '
+    assert_log_contains 'VLLM_SOURCE_COMMIT='"$LOCAL_VLLM_SOURCE_COMMIT"
+    pass "--vllm-source-dir defaults to the checkout HEAD"
+}
+
+test_local_vllm_source_rejects_conflicting_repo() {
+    setup_fixture
+    create_local_vllm_source
+    if run_build \
+        --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" \
+        --vllm-repo https://github.com/example/vllm.git; then
+        fail "--vllm-source-dir unexpectedly accepted --vllm-repo"
+    fi
+    assert_log_not_contains '^docker build'
+    assert_output_contains 'Error: --vllm-source-dir is incompatible with --vllm-repo\.'
+    pass "--vllm-source-dir rejects an explicit repository"
+}
+
+test_local_vllm_source_rejects_dirty_checkout() {
+    setup_fixture
+    create_local_vllm_source
+    printf '# dirty\n' >> "$LOCAL_VLLM_SOURCE_DIR/pyproject.toml"
+    if run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR"; then
+        fail "--vllm-source-dir unexpectedly accepted a dirty checkout"
+    fi
+    assert_log_not_contains '^docker build'
+    assert_output_contains 'Error: --vllm-source-dir must be clean; commit or stash local changes first\.'
+    pass "--vllm-source-dir rejects a dirty checkout"
+}
+
+test_local_vllm_source_rejects_missing_ref() {
+    setup_fixture
+    create_local_vllm_source
+    if run_build --vllm-source-dir "$LOCAL_VLLM_SOURCE_DIR" --vllm-ref missing-ref; then
+        fail "--vllm-source-dir unexpectedly accepted a missing ref"
+    fi
+    assert_log_not_contains '^docker build'
+    assert_output_contains "Error: --vllm-ref 'missing-ref' is not available in the local vLLM checkout\."
+    pass "--vllm-source-dir resolves refs without fetching"
 }
 
 test_exp_b12x_uses_prebuilt_image() {
@@ -529,19 +621,19 @@ test_exp_b12x_rebuild_vllm_uses_preset_source_build() {
     setup_fixture
     run_build --exp-b12x --rebuild-vllm || fail "--exp-b12x --rebuild-vllm run failed"
     assert_log_not_contains '^docker pull eugr/spark-vllm-b12x:latest$'
-    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/gilded-gnosis --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a --build-arg FLASHINFER_CUDA_ARCH_LIST=12.1a .*--build-arg TORCH_VERSION=2.13.0 --build-arg TORCHVISION_VERSION=0.28.0 --build-arg TORCHAUDIO_VERSION=2.11.0 --build-arg CUTLASS_DSL_VERSION=4.7.0 .*--build-arg VLLM_REF=dev/infernal-invocation --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 .*--build-arg VLLM_PRESERVE_SM12X_TARGET=1 --build-arg VLLM_PATCH_B12X_C128A_ALIGNMENT=1'
     assert_log_contains '^docker build -t vllm-node-b12x .*--build-context flashinfer_wheels=\./\.wheel-cache/flashinfer/regular --build-context vllm_wheels=\./\.wheel-cache/vllm/b12x .*--build-arg B12X_REPO=https://github.com/lukealonso/b12x.git --build-arg B12X_REF=master '
     assert_log_contains '.*--build-arg B12X_CACHEBUST=[0-9]+'
     assert_log_not_contains 'Dockerfile\.mxfp4'
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset\)\.\.\.'
-    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/gilded-gnosis\.'
+    assert_output_contains 'Building B12X from https://github\.com/lukealonso/b12x\.git ref master for https://github\.com/local-inference-lab/vllm ref dev/infernal-invocation\.'
     pass "--exp-b12x --rebuild-vllm uses the B12X source-build profile"
 }
 
 test_exp_b12x_allows_vllm_prs() {
     setup_fixture
     run_build --exp-b12x --apply-vllm-pr 12345 || fail "--exp-b12x with vLLM PR run failed"
-    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=dev/gilded-gnosis --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 --build-arg CACHEBUST_VLLM=[0-9]+ --build-arg VLLM_PRS=12345'
+    assert_log_contains '^docker build --target vllm-export .*--build-arg VLLM_REF=dev/infernal-invocation --build-arg VLLM_REPO=https://github.com/local-inference-lab/vllm --build-arg VLLM_APPLY_PRESET_PRS=0 --build-arg CACHEBUST_VLLM=[0-9]+ --build-arg VLLM_PRS=12345'
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset with requested vLLM PRs\)\.\.\.'
     assert_output_contains 'Applying vLLM PRs: 12345'
     pass "--exp-b12x accepts additional vLLM PR patches"
@@ -584,20 +676,20 @@ test_exp_b12x_rejects_preset_overrides() {
     pass "--exp-b12x rejects conflicting build presets and overrides"
 }
 
-test_exp_b12x_variable_names_are_generic() {
+test_b12x_package_variable_names_are_generic() {
     if grep -q 'FATHOMLESS_' "$PROJECT_DIR/build-and-copy.sh"; then
         fail "build-and-copy.sh still contains FATHOMLESS-prefixed variables"
     fi
     for expected in \
         'EXP_B12X_VLLM_REPO=' \
         'EXP_B12X_VLLM_REF=' \
-        'EXP_B12X_PACKAGE_REPO=' \
-        'EXP_B12X_PACKAGE_REF='; do
+        'B12X_PACKAGE_REPO=' \
+        'B12X_PACKAGE_REF='; do
         if ! grep -Fq "$expected" "$PROJECT_DIR/build-and-copy.sh"; then
             fail "build-and-copy.sh is missing generic B12X variable: $expected"
         fi
     done
-    pass "B12X preset variables use generic EXP_B12X names"
+    pass "B12X package variables use generic names"
 }
 
 test_exp_b12x_preserves_blackwell_arches() {
@@ -633,6 +725,209 @@ test_exp_b12x_rebuilds_mismatched_cached_vllm_arch() {
     assert_log_contains '^docker build --target vllm-export .*--build-arg TORCH_CUDA_ARCH_LIST=12.1a '
     assert_output_contains 'Rebuilding vLLM wheels \(--exp-b12x preset\)\.\.\.'
     pass "--exp-b12x does not reuse a vLLM wheel for another architecture"
+}
+
+test_b12x_c128a_alignment_patch_is_guarded_and_idempotent() {
+    local patch_script="$PROJECT_DIR/docker/patch_vllm_b12x_c128a_topk_alignment.py"
+    local patch_fixture="$TMP_BASE/b12x-c128a-patch"
+    local target_dir="$patch_fixture/vllm/models/deepseek_v4"
+    local helper_dir="$patch_fixture/vllm/v1/attention/backends/mla"
+    local target="$target_dir/sparse_mla.py"
+    local helper="$helper_dir/compressor_utils.py"
+    local output="$patch_fixture/output.log"
+    local unknown_fixture="$TMP_BASE/b12x-c128a-unknown"
+
+    mkdir -p "$target_dir" "$helper_dir"
+    cat > "$target" <<'PY'
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_c128a_topk_width,
+    get_compressed_slot_mapping,
+)
+
+
+def active_width(value: int) -> int:
+    return max(value, _C128A_TOPK_ALIGNMENT)
+PY
+    cat > "$helper" <<'PY'
+_C128A_TOPK_ALIGNMENT = 128
+
+
+def get_c128a_topk_width():
+    pass
+
+
+def get_compressed_slot_mapping():
+    pass
+PY
+    cp -a "$patch_fixture" "$unknown_fixture"
+    sed -i 's/_C128A_TOPK_ALIGNMENT = 128/_C128A_TOPK_ALIGNMENT = 64/' \
+        "$unknown_fixture/vllm/v1/attention/backends/mla/compressor_utils.py"
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=0 python3 "$patch_script" \
+        "$patch_fixture" > "$output"
+    if grep -Fq '    _C128A_TOPK_ALIGNMENT,' "$target"; then
+        fail "B12X C128A patch changed source while its build guard was disabled"
+    fi
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$patch_fixture" >> "$output"
+    if [ "$(grep -Fc '    _C128A_TOPK_ALIGNMENT,' "$target")" -ne 1 ]; then
+        fail "B12X C128A patch did not add exactly one alignment import"
+    fi
+
+    VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$patch_fixture" >> "$output"
+    if ! grep -Fq \
+        'DeepSeek V4 C128A alignment is already defined or imported; skipping' \
+        "$output"; then
+        fail "B12X C128A patch is not idempotent"
+    fi
+
+    if VLLM_PATCH_B12X_C128A_ALIGNMENT=invalid python3 "$patch_script" \
+        "$patch_fixture" >> "$output" 2>&1; then
+        fail "B12X C128A patch accepted an invalid build guard"
+    fi
+
+    if VLLM_PATCH_B12X_C128A_ALIGNMENT=1 python3 "$patch_script" \
+        "$unknown_fixture" >> "$output" 2>&1; then
+        fail "B12X C128A patch accepted an unexpected helper constant"
+    fi
+    if grep -Fq '    _C128A_TOPK_ALIGNMENT,' \
+        "$unknown_fixture/vllm/models/deepseek_v4/sparse_mla.py"; then
+        fail "B12X C128A patch mutated an unknown source shape"
+    fi
+    pass "B12X C128A alignment workaround is guarded and idempotent"
+}
+
+test_mrv2_speculator_cudagraph_pool_patch_is_guarded_and_idempotent() {
+    local patch_script="$PROJECT_DIR/docker/patch_vllm_mrv2_speculator_cudagraph_pool.py"
+    local patch_fixture="$TMP_BASE/mrv2-speculator-cudagraph-pool"
+    local target_dir="$patch_fixture/vllm/v1/worker/gpu"
+    local target="$target_dir/cudagraph_utils.py"
+    local output="$patch_fixture/output.log"
+    local unknown_fixture="$TMP_BASE/mrv2-speculator-cudagraph-pool-unknown"
+    local equivalent_fixture="$TMP_BASE/mrv2-speculator-cudagraph-pool-equivalent"
+
+    mkdir -p "$target_dir"
+    cat > "$target" <<'PY'
+from typing import Any
+
+
+class CudaGraphManager:
+    pass
+
+
+def profile_cudagraph_memory(runner):
+    """PIECEWISE, encoder and speculator graphs are measured in full."""
+    manager = runner.cudagraph_manager
+    all_wrappers: list[Any] = []
+    original_pools: dict[int, Any] = {}
+    try:
+        manager.pool = current_platform.graph_pool_handle()
+        if manager.use_breakable_cg:
+            pass
+    finally:
+        CUDAGraphWrapper.clear_all_graphs()
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        for wrapper in all_wrappers:
+            pass
+PY
+    cp -a "$patch_fixture" "$unknown_fixture"
+    sed -i 's/if manager.use_breakable_cg:/if bool(manager.use_breakable_cg):/' \
+        "$unknown_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"
+
+    python3 "$patch_script" "$patch_fixture" > "$output"
+    for expected in \
+        'speculator_manager.pool = manager.pool' \
+        'speculator_manager.graphs.clear()' \
+        'setattr(runner.speculator, name, None)'; do
+        if ! grep -Fq "$expected" "$target"; then
+            fail "MRV2 speculator pool patch is missing: $expected"
+        fi
+    done
+    python3 -m py_compile "$target"
+
+    local before after
+    before=$(sha256sum "$target")
+    python3 "$patch_script" "$patch_fixture" >> "$output"
+    after=$(sha256sum "$target")
+    if [ "$before" != "$after" ]; then
+        fail "MRV2 speculator pool patch is not idempotent"
+    fi
+    if ! grep -Fq \
+        'Equivalent MRV2 speculator CUDA-graph pool fix is present; skipping' \
+        "$output"; then
+        fail "MRV2 speculator pool patch did not report its idempotent skip"
+    fi
+
+    local equivalent_target="$equivalent_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"
+    mkdir -p "$(dirname "$equivalent_target")"
+    cat > "$equivalent_target" <<'PY'
+from typing import Any
+
+
+class CudaGraphManager:
+    pass
+
+
+def _profiling_cudagraph_managers(runner) -> list[CudaGraphManager]:
+    managers = [runner.cudagraph_manager]
+    speculator = runner.speculator
+    if speculator is not None:
+        for name in ("prefill_cudagraph_manager", "decode_cudagraph_manager"):
+            candidate = getattr(speculator, name, None)
+            if isinstance(candidate, CudaGraphManager):
+                managers.append(candidate)
+    return managers
+
+
+def profile_cudagraph_memory(runner):
+    """PIECEWISE, encoder and speculator graphs are measured in full."""
+    manager = runner.cudagraph_manager
+    all_wrappers: list[Any] = []
+    original_pools: dict[int, Any] = {}
+    graph_managers = _profiling_cudagraph_managers(runner)
+    original_manager_pools = {
+        id(graph_manager): graph_manager.pool for graph_manager in graph_managers
+    }
+    try:
+        manager.pool = current_platform.graph_pool_handle()
+        for graph_manager in graph_managers:
+            graph_manager.pool = manager.pool
+        if manager.use_breakable_cg:
+            pass
+    finally:
+        CUDAGraphWrapper.clear_all_graphs()
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        for graph_manager in graph_managers:
+            graph_manager.graphs.clear()
+            graph_manager.pool = original_manager_pools[id(graph_manager)]
+        for wrapper in all_wrappers:
+            pass
+PY
+    local equivalent_before equivalent_after
+    equivalent_before=$(sha256sum "$equivalent_target")
+    python3 "$patch_script" "$equivalent_fixture" >> "$output"
+    equivalent_after=$(sha256sum "$equivalent_target")
+    if [ "$equivalent_before" != "$equivalent_after" ]; then
+        fail "MRV2 speculator pool patch modified an equivalent manager-collection fix"
+    fi
+    if ! tail -n 1 "$output" | grep -Fq \
+        'Equivalent MRV2 speculator CUDA-graph pool fix is present; skipping'; then
+        fail "MRV2 speculator pool patch did not recognize the manager-collection fix"
+    fi
+
+    local unknown_target="$unknown_fixture/vllm/v1/worker/gpu/cudagraph_utils.py"
+    local unknown_before unknown_after
+    unknown_before=$(sha256sum "$unknown_target")
+    if python3 "$patch_script" "$unknown_fixture" >> "$output" 2>&1; then
+        fail "MRV2 speculator pool patch accepted an unknown vulnerable layout"
+    fi
+    unknown_after=$(sha256sum "$unknown_target")
+    if [ "$unknown_before" != "$unknown_after" ]; then
+        fail "MRV2 speculator pool patch partially modified an unknown layout"
+    fi
+    pass "MRV2 speculator CUDA-graph pool workaround is guarded and idempotent"
 }
 
 test_dockerfile_preserves_selected_blackwell_target() {
@@ -729,6 +1024,20 @@ test_dockerfile_custom_repo_bypasses_shared_cache() {
         fi
     done
     pass "custom vLLM repositories bypass the shared upstream checkout cache"
+}
+
+test_dockerfile_accepts_local_vllm_context() {
+    for expected in \
+        'FROM scratch AS vllm_source' \
+        '--mount=type=bind,from=vllm_source,target=/tmp/vllm-local-source' \
+        'if [ "$VLLM_SOURCE_MODE" = "local" ]' \
+        'if [ "$(git rev-parse HEAD)" != "$VLLM_SOURCE_COMMIT" ]' \
+        'git remote remove origin 2>/dev/null || true'; do
+        if ! grep -Fq -- "$expected" "$PROJECT_DIR/Dockerfile"; then
+            fail "Dockerfile local vLLM source block is missing: $expected"
+        fi
+    done
+    pass "Dockerfile consumes a verified local vLLM named context"
 }
 
 test_dockerfile_uses_configurable_torch_versions() {
@@ -873,6 +1182,31 @@ test_dockerfile_applies_flashinfer_prs_without_merging_branch_history() {
     pass "FlashInfer PRs apply as patches without merging branch history"
 }
 
+test_dockerfile_uses_prepared_python_for_flashinfer_builds() {
+    local flashinfer_builder_block="$TMP_BASE/flashinfer-builder-block"
+
+    sed -n '/FROM base AS flashinfer-builder/,/FROM scratch AS flashinfer-export/p' \
+        "$PROJECT_DIR/Dockerfile" > "$flashinfer_builder_block"
+
+    for expected in \
+        'ARG FLASHINFER_BUILD_PYTHON=/usr/bin/python3' \
+        'ENV UV_PYTHON_DOWNLOADS=never' \
+        'uv pip install --python "$FLASHINFER_BUILD_PYTHON" packaging filelock' \
+        '"$FLASHINFER_BUILD_PYTHON" -c '\''import filelock, packaging, requests, torch, tqdm'\'''; do
+        if ! grep -Fq "$expected" "$flashinfer_builder_block"; then
+            fail "FlashInfer builder does not prepare its selected Python consistently: $expected"
+        fi
+    done
+
+    if [ "$(grep -Fc 'uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation' "$flashinfer_builder_block")" -ne 3 ]; then
+        fail "FlashInfer builder does not use the prepared Python for all three wheel builds"
+    fi
+    if grep -Fq 'uv build --no-build-isolation' "$flashinfer_builder_block"; then
+        fail "FlashInfer builder still contains a build that can honor upstream .python-version"
+    fi
+    pass "FlashInfer wheel builds use the prepared system Python"
+}
+
 test_dockerfiles_pin_tvm_ffi_regression_version() {
     if [ "$(grep -Fc 'apache-tvm-ffi==0.1.12' "$PROJECT_DIR/Dockerfile")" -ne 2 ] || \
        [ "$(grep -Fc 'apache-tvm-ffi==0.1.12' "$PROJECT_DIR/Dockerfile.mxfp4")" -ne 1 ]; then
@@ -913,8 +1247,8 @@ test_dockerfile_externalizes_vllm_source_patches() {
             fail "Dockerfile does not execute external patch: $patch_name"
         fi
     done
-    if [ "$patch_count" -ne 10 ]; then
-        fail "Expected 10 external vLLM patch scripts, found $patch_count"
+    if [ "$patch_count" -ne 12 ]; then
+        fail "Expected 12 external vLLM patch scripts, found $patch_count"
     fi
     if ! python3 -c '
 from pathlib import Path
@@ -940,6 +1274,7 @@ test_use_wheels_rejects_mismatched_flashinfer_arch
 test_use_wheels_rejects_mismatched_vllm_arch
 test_use_wheels_non_default_empty_cache_skips_downloads
 test_use_wheels_uses_wheel_build
+test_regular_build_includes_b12x_package
 test_use_wheels_never_falls_back_to_source
 test_use_wheels_never_builds_missing_vllm_implicitly
 test_use_wheels_builds_only_explicit_source_target
@@ -960,27 +1295,36 @@ test_vllm_ref_can_apply_preset_prs_explicitly
 test_apply_preset_prs_forces_vllm_rebuild
 test_requested_vllm_prs_apply_to_selected_vllm_ref
 test_custom_vllm_repo_forces_source_build
+test_local_vllm_source_builds_selected_ref
+test_local_vllm_source_defaults_to_head
+test_local_vllm_source_rejects_conflicting_repo
+test_local_vllm_source_rejects_dirty_checkout
+test_local_vllm_source_rejects_missing_ref
 test_exp_b12x_uses_prebuilt_image
 test_exp_b12x_rebuild_vllm_uses_preset_source_build
 test_exp_b12x_allows_vllm_prs
 test_exp_b12x_respects_custom_tag
 test_exp_b12x_rejects_use_wheels
 test_exp_b12x_rejects_preset_overrides
-test_exp_b12x_variable_names_are_generic
+test_b12x_package_variable_names_are_generic
 test_exp_b12x_preserves_blackwell_arches
 test_exp_b12x_rebuilds_mismatched_cached_flashinfer_arch
 test_exp_b12x_rebuilds_mismatched_cached_vllm_arch
+test_b12x_c128a_alignment_patch_is_guarded_and_idempotent
+test_mrv2_speculator_cudagraph_pool_patch_is_guarded_and_idempotent
 test_dockerfile_preserves_selected_blackwell_target
 test_custom_torch_versions_are_forwarded
 test_local_inference_lab_b12x_applies_to_any_ref
 test_local_inference_lab_b12x_requires_torch_212
 test_dockerfile_custom_repo_bypasses_shared_cache
+test_dockerfile_accepts_local_vllm_context
 test_dockerfile_uses_configurable_torch_versions
 test_dockerfile_pins_cutlass_dsl_47_everywhere
 test_dockerfile_uses_profiled_named_wheel_contexts
 test_dockerfile_builds_and_verifies_b12x_source
 test_copied_vllm_git_index_is_refreshed_before_patch_apply
 test_dockerfile_applies_flashinfer_prs_without_merging_branch_history
+test_dockerfile_uses_prepared_python_for_flashinfer_builds
 test_dockerfiles_pin_tvm_ffi_regression_version
 test_dockerfile_fetches_vllm_prs_from_upstream
 test_dockerfile_externalizes_vllm_source_patches

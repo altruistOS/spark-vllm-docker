@@ -37,7 +37,7 @@ We will expand the selection of models we test in the pipeline, but since vLLM i
 Selecting `--exp-b12x` without local-build flags or customizations pulls the separately tested
 `eugr/spark-vllm-b12x:latest` image and tags it as `vllm-node-b12x`.
 
-If you want to build only the runner from precompiled vLLM and FlashInfer wheels, specify `--use-wheels`. This option never falls back to compiling missing wheels: if a wheel cannot be downloaded or found locally, the command stops with an error. To build the latest vLLM from the main branch, use `--rebuild-vllm`; to target a specific repository, release, or commit, set `--vllm-repo` and/or `--vllm-ref`.
+If you want to build only the runner from precompiled vLLM and FlashInfer wheels, specify `--use-wheels`. This option never falls back to compiling missing wheels: if a wheel cannot be downloaded or found locally, the command stops with an error. To build the latest vLLM from the main branch, use `--rebuild-vllm`; to target a specific repository, release, or commit, set `--vllm-repo` and/or `--vllm-ref`. To build a private or already-available checkout without cloning it inside Docker, use `--vllm-source-dir`.
 
 Similarly, `--rebuild-flashinfer`, `--flashinfer-ref`, and `--apply-flashinfer-pr` control the FlashInfer build and force the local build path.
 
@@ -89,7 +89,7 @@ The default image preparation speed depends mostly on your Internet connection a
 
 For slower internet connections it can be faster to build from the precompiled wheels by using `--use-wheels` parameter. An initial build speed depends on your Internet connection speed and whether the base image is already present on your machine. After base image pull, the build should take only 2-3 minutes.
 
-If `--use-wheels`, `--rebuild-vllm`, `--rebuild-flashinfer`, or another build customization is used, the script keeps the local wheel-based runner path. `--use-wheels` by itself only downloads or reuses precompiled wheels; source compilation occurs only for a dependency explicitly selected by a source-build flag. Full source rebuilds can take 20-40 minutes, but subsequent builds are faster.
+If `--use-wheels`, `--rebuild-vllm`, `--rebuild-flashinfer`, or another build customization is used, the script keeps the local wheel-based runner path. `--use-wheels` by itself only downloads or reuses precompiled vLLM and FlashInfer wheels; the runner stage still installs its normal runtime dependencies, including the B12X package for regular upstream builds. Source compilation of vLLM or FlashInfer occurs only when that dependency is explicitly selected by a source-build flag. Full source rebuilds can take 20-40 minutes, but subsequent builds are faster.
 
 ### Run
 
@@ -230,6 +230,47 @@ by the mod's `run.sh` on every node):
 
 ## CHANGELOG
 
+### 2026-08-25
+
+#### Local vLLM source checkouts
+
+`build-and-copy.sh --vllm-source-dir <path>` now builds vLLM from a clean local
+Git checkout without requiring the Docker builder to access its remote or host
+credentials. An optional `--vllm-ref` is resolved locally; otherwise the build
+uses the checkout's current `HEAD`. The host checkout is never modified.
+
+### 2026-08-21
+
+#### B12X package in regular builds
+
+Regular local runner builds from `vllm-project/vllm` now build and install the
+external B12X package, matching the B12X support being integrated into upstream
+vLLM. The experimental `--exp-b12x` profile continues to install the same
+package for its maintained fork.
+
+### 2026-08-19
+
+#### Launch-time vLLM PR application
+
+`launch-cluster.sh` and `run-recipe.sh` now accept repeatable
+`--apply-vllm-pr <pr-num>` options. The launcher fetches each upstream PR once,
+validates that it only changes installed `vllm/` runtime files, and applies it
+to every newly created container in command-line layer order. PRs that require
+native compilation, dependency changes, or packaging changes are rejected with
+instructions to use the existing build-time option instead.
+
+Example:
+
+```bash
+./launch-cluster.sh --solo --apply-vllm-pr 52816 exec vllm serve Inferact/Qwen3.8-27B-NVFP4   --host 0.0.0.0   --port 8000   --trust-remote-code   --kv-cache-dtype fp8   --gpu-memory-utilization 0.7   --max-model-len 262144   --max-num-seqs 8   --max-num-batched-tokens 16384   --enable-chunked-prefill   --async-scheduling   --enable-prefix-caching   --speculative-config '{"method":"dflash","model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens":8}'   --load-format instanttensor   --reasoning-parser qwen3   --tool-call-parser qwen3_xml   --enable-auto-tool-choice
+```
+
+### 2026-08-14
+
+#### B12X source branch update
+
+B12X source builds now use `local-inference-lab/vllm@dev/infernal-invocation`.
+
 ### 2026-08-12
 
 #### PyTorch 2.13 and CUTLASS DSL 4.7
@@ -266,7 +307,7 @@ Added the cluster-only `recipes/8x-spark-cluster/glm-5.2-nvfp4.yaml` recipe for 
 
 #### New B12X image
 
-Added `--exp-b12x` (alias: `--experimental-b12x`) as an alternative version built from [a fork by Luke Alonso](https://github.com/local-inference-lab/vllm/tree/dev/gilded-gnosis). This fork supports a collection of experimental high-performance B12X kernels for sm12x architecture. 
+Added `--exp-b12x` (alias: `--experimental-b12x`) as an alternative version built from [a fork by Luke Alonso](https://github.com/local-inference-lab/vllm/tree/dev/infernal-invocation). This fork supports a collection of experimental high-performance B12X kernels for sm12x architecture.
 
 Since it is built from a forked vLLM branch, it will be supported in parallel to the main ("regular") build, at least for the time being.
 
@@ -1498,6 +1539,23 @@ Using a different username:
   --torchaudio-version none
 ```
 
+**Build a clean local vLLM checkout:**
+
+```bash
+./build-and-copy.sh \
+  --vllm-source-dir /path/to/vllm \
+  --vllm-ref branch-or-commit
+```
+
+The ref must already be available in the local checkout; this path never
+fetches or modifies the source directory. Without `--vllm-ref`, the selected
+commit is the checkout's current `HEAD`. The wrapper creates a temporary,
+self-contained staging checkout and passes it to Docker as a named build
+context. Dirty checkouts and repositories with Git submodules are rejected.
+`--vllm-source-dir` is incompatible with `--vllm-repo`, `--use-wheels`,
+`--force-vllm-download`, `--no-build`, and the separate `--exp-mxfp4` and
+`--exp-b12x` profiles.
+
 For the maintained experimental B12X combination, the equivalent shortcut is:
 
 ```bash
@@ -1506,7 +1564,7 @@ For the maintained experimental B12X combination, the equivalent shortcut is:
 
 Without local-build flags, this pulls `eugr/spark-vllm-b12x:latest` and tags it
 as `vllm-node-b12x` unless `-t` is supplied. To build the maintained combination
-from `local-inference-lab/vllm@dev/gilded-gnosis` and the `master` branch of the
+from `local-inference-lab/vllm@dev/infernal-invocation` and the `master` branch of the
 B12X repository, run:
 
 ```bash
@@ -1524,7 +1582,7 @@ including B12X: alternate targets rebuild FlashInfer when no matching
 architecture marker is present, and the cached wheel records its architecture
 so a later build cannot silently reuse a wheel for a different target.
 
-Custom vLLM repositories are cloned fresh instead of using the shared upstream checkout cache. Specifying a custom repository forces a vLLM source build. Upstream preset PRs are skipped by default for custom repositories and refs.
+Custom vLLM repositories are cloned fresh instead of using the shared upstream checkout cache. Specifying a custom repository or local source checkout forces a vLLM source build. Upstream preset PRs are skipped by default for custom repositories, local source checkouts, and refs.
 
 Wheel profiles are selected automatically:
 
@@ -1543,7 +1601,7 @@ Only regular vLLM wheels are downloaded from the published wheel release.
 `--exp-b12x` is therefore incompatible with `--use-wheels`: use bare
 `--exp-b12x` for the published image or add `--rebuild-vllm` for a source build.
 
-For any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `b12x` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. Before the `--no-deps` install, its package metadata is updated to the image-wide CUTLASS DSL 4.7.0 pin. The exact source commit is recorded at `/workspace/b12x-source-commit`. B12X requires PyTorch 2.12 or newer; the preset uses 2.13.0.
+For regular `vllm-project/vllm` builds and any branch, tag, or commit selected from `local-inference-lab/vllm`, the runner freshly clones the `master` ref of `https://github.com/lukealonso/b12x.git`, builds and installs its `b12x` distribution automatically. A per-build cache key prevents Docker from reusing a stale source checkout. Before the `--no-deps` install, its package metadata is updated to the image-wide CUTLASS DSL 4.7.0 pin. The exact source commit is recorded at `/workspace/b12x-source-commit`. B12X requires PyTorch 2.12 or newer; both current build profiles use 2.13.0.
 
 **Copy existing image without rebuilding:**
 
@@ -1564,12 +1622,13 @@ For any branch, tag, or commit selected from `local-inference-lab/vllm`, the run
 | `--force-vllm-download` | Force download vLLM wheels, skipping cached wheel checks |
 | `--force-download` | Force download all prebuilt wheels, skipping cached wheel checks |
 | `--vllm-repo <url>` | vLLM Git repository. Defaults to `https://github.com/vllm-project/vllm.git`; custom repositories bypass the shared checkout cache and force a source build. |
-| `--vllm-ref <ref>` | vLLM commit SHA, branch or tag (default: `main`) |
+| `--vllm-source-dir <path>` | Build vLLM from a clean local Git checkout staged into Docker without remote credentials. Incompatible with `--vllm-repo`, wheel/download-only paths, `--no-build`, and experimental build profiles. |
+| `--vllm-ref <ref>` | vLLM commit SHA, branch or tag. Defaults to `main` for remote repositories and the current `HEAD` with `--vllm-source-dir`. |
 | `--torch-version <version>` | PyTorch version installed in source-build and runner stages (default: `2.13.0`) |
 | `--torchvision-version <version>` | Optional torchvision version (default: `0.28.0`) |
 | `--torchaudio-version <version>` | Optional torchaudio version (default: `2.11.0`; use `none` to omit it) |
 | `--flashinfer-ref <ref>` | FlashInfer commit SHA, branch or tag (default: `main`) |
-| `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during build. Can be specified multiple times. |
+| `--apply-vllm-pr <pr-num>` | Apply a vLLM PR patch during the image build. Can be specified multiple times. This is distinct from the launch-time option accepted by `launch-cluster.sh` and `run-recipe.sh`. |
 | `--apply-preset-vllm-prs` | Apply preset vLLM PRs even when `--vllm-repo`, `--vllm-ref`, or `--apply-vllm-pr` would otherwise suppress them |
 | `--apply-flashinfer-pr <pr-num>` | Apply a FlashInfer PR patch during build. Can be specified multiple times. |
 | `--tf5` | Deprecated compatibility flag; pulls/tags the prebuilt image as `vllm-node-tf5` unless another build-forcing flag is set. Aliases: `--pre-tf, --pre-transformers`. |
@@ -1760,6 +1819,7 @@ discovered correctly:
 | `-e, --env` | Environment variable to pass to container (e.g. `-e VAR=val`). Can be used multiple times. |
 | `-j` | Number of parallel jobs for build environment variables (optional). |
 | `--apply-mod` | Apply mods/patches from specified directory. Can be used multiple times to apply multiple mods. |
+| `--apply-vllm-pr <pr-num>` | Fetch and apply an upstream vLLM PR to the installed runtime package before launch. Runtime-only; repeatable and ordered with `--apply-mod`. |
 | `--nccl-debug` | NCCL debug level (e.g., INFO, WARN). Defaults to INFO if flag is present but value is omitted. |
 | `--check-config` | Check configuration and auto-detection without launching. |
 | `--solo` | Solo mode: skip autodetection, launch only on current node, do not launch Ray cluster |
@@ -1965,6 +2025,7 @@ The repository includes several pre-configured mods in the `mods/` directory:
 - **fix-qwen3.5-chat-template/** and **fix-qwen3.6-chat-template/**: Install fixed chat templates used by the Qwen3.5 and Qwen3.6 recipes.
 - **fix-qwen3.5-autoround/**, **fix-qwen3-next-autoround/**, and **fix-qwen35-tp4-marlin/**: Model-specific Qwen AutoRound and Marlin compatibility fixes.
 - **fix-qwen3-coder-next/**: Qwen3-Coder-Next runtime and performance fixes.
+- **radixark-dspark/**: Routes Qwen DSpark checkpoints such as `RadixArk/Qwen3.8-27B-DSpark` to vLLM's Qwen3 DSpark loader instead of the DeepSeek-V4 loader.
 - **dspark-instanttensor/**: Filters embedded `mtp.*` DSpark draft weights before InstantTensor or safetensors I/O, preventing a second full-checkpoint load.
 - **gpu-mem-util-gb/**: Adds experimental `--gpu-memory-utilization-gb` support.
 - **kv-cache-prealloc-cleanup/**: Applies model-specific manual KV-cache startup tweaks: skip CUDA graph profiling when disabled by env and allow `--gpu-memory-utilization-gb` with `--kv-cache-memory-bytes`.
@@ -2002,6 +2063,53 @@ When using recipes, any mods listed in the recipe are applied first, followed by
 ```bash
 ./run-recipe.sh glm-4.7-flash-awq --solo --apply-mod ./mods/other-mod
 ```
+
+### Applying an Upstream PR at Launch Time
+
+For Python/package-only vLLM changes, `launch-cluster.sh` can create a temporary
+mod from an upstream PR without rebuilding the image or adding a permanent
+directory under `mods/`:
+
+```bash
+./launch-cluster.sh --solo \
+  --apply-vllm-pr 12345 \
+  exec vllm serve MODEL_NAME --port 8000 --host 0.0.0.0
+
+./run-recipe.sh glm-4.7-flash-awq --solo \
+  --apply-vllm-pr 12345
+```
+
+The PR diff is downloaded once on the head node, checksum-logged, and copied to
+every container through the normal mod distribution path. Multiple PRs are
+applied in the order specified. With direct launcher use, `--apply-mod` and
+`--apply-vllm-pr` share command-line ordering. With recipes, recipe-declared
+mods remain first, followed by command-line layers in their specified order.
+
+The runtime path only applies files installed under `vllm/`. Tests, docs,
+examples, CI configuration, and the source tree's `setup.py` are ignored.
+Ignoring `setup.py` does not install or update dependencies, so the container
+must already provide any package version required by the PR. A PR that changes
+CUDA/C++ or other unrecognized build/source-tree files is rejected. Apply such
+a PR while building the image instead:
+
+```bash
+./build-and-copy.sh --apply-vllm-pr 12345
+```
+
+Runtime PR application requires `git` in the container. For an official vLLM
+image that omits it, put `mods/use-official-vllm` before the PR layer:
+
+```bash
+./launch-cluster.sh --solo \
+  --apply-mod mods/use-official-vllm \
+  --apply-vllm-pr 12345 \
+  exec vllm serve MODEL_NAME
+```
+
+The change is ephemeral and is reapplied whenever new containers are created.
+The launcher refuses `--apply-vllm-pr` when containers with the selected name
+are already running, because it cannot verify that those containers contain the
+requested patch.
 
 ### Creating Custom Mods
 

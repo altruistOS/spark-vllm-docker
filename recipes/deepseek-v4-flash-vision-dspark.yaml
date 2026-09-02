@@ -45,6 +45,12 @@ env:
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  # vision-exp token-count reconcile: vLLM counts N+1 image placeholders for
+  # the N-layout block; insert num_tokens-1 so placeholders==block length.
+  # Set VISION_EXP_PLACEHOLDER_DELTA=0 to disable (old broken behavior).
+  VISION_EXP_PLACEHOLDER_DELTA: "1"
+  # Debug logging confirmed the fix; turn off now to avoid per-request noise.
+  VISION_EXP_DEBUG: "0"
 
 command: |
   vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \

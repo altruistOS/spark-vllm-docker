@@ -249,7 +249,26 @@ class DeepseekV4VisionExpMultiModalProcessor(
                 num_tokens = int(num_tokens)
             if num_tokens <= 0:
                 raise ValueError(f"Image {item_idx} produced 0 vision tokens")
-            return [image_token_id] * num_tokens
+            # vLLM's scheduler counts ONE extra image placeholder for this
+            # N-layout block than the block actually emits (observed crash:
+            # block=356 but placeholders=357 -> fatal mismatch). VLLM-EXP
+            # therefore inserts `delta` fewer placeholder tokens so the final
+            # prompt holds exactly `num_tokens` placeholders == block length.
+            # Tunable via env so it can be flipped without an image change:
+            #   VISION_EXP_PLACEHOLDER_DELTA=0  -> insert num_tokens (old broken)
+            #   VISION_EXP_PLACEHOLDER_DELTA=1  -> insert num_tokens-1 (default)
+            import os as _vllm_exp_os
+            _delta = int(_vllm_exp_os.environ.get("VISION_EXP_PLACEHOLDER_DELTA", "1"))
+            _n = max(1, num_tokens - _delta)
+            _dbg = int(_vllm_exp_os.environ.get("VISION_EXP_DEBUG", "0"))
+            if _dbg:
+                print(
+                    f"[vision-exp] item {item_idx}: num_tokens={num_tokens} "
+                    f"delta={_delta} -> placeholders={_n} (block={num_tokens})",
+                    file=__import__("sys").stderr,
+                    flush=True,
+                )
+            return [image_token_id] * _n
 
         return [
             PromptReplacement(

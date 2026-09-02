@@ -137,7 +137,11 @@ def _validate_no_image_sp_tokens(msg):
             + repr(IMAGE_PLACEHOLDER)
         )
     role = msg.get("role")
-    if role in ("user", "developer"):
+    # Allow tool/function roles too: Codex's agentic flow delivers image
+    # results (e.g. view_image) back in tool messages / Responses
+    # function_call_output. Official DeepSeek restriction only blocks
+    # system/assistant, which historically had no image pipeline.
+    if role in ("user", "developer", "tool", "function"):
         return
     if _dspark_vision_value_has_image(msg.get("content")) or _dspark_vision_value_has_image(
         msg.get("content_blocks")

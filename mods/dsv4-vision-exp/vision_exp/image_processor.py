@@ -34,6 +34,61 @@ def _pil():
 IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
 IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+# Vision-Exp added-token id (vocab_size 129280). In-vocab, so hash MoE
+# layers 0–2 look up tid2eid[129264] unless image rows skip the table (#175).
+IMAGE_TOKEN_ID = 129264
+# Encoder-cache identity suffix. Layout length depends on start_pos % 4;
+# vLLM's mm hash is image bytes only (issue #172).
+LAYOUT_HASH_TAG = "vlexp-ntok"
+
+
+def compress_pad_tokens(start_pos: int) -> int:
+    """IMAGE_PAD tokens prepended so the image block starts on a 4-token boundary."""
+    return COMPRESS_PAD_TO - 1 - int(start_pos) % COMPRESS_PAD_TO
+
+
+def image_block_num_tokens(n_llm_h: int, n_llm_w: int, start_pos: int) -> int:
+    """LLM tokens in one N-layout block (start/end, row newlines, compress pad).
+
+    A 40×19 ViT grid (patch 14, downsample 3) is a 7×14 LLM grid: 122 plus
+    compress_pad 0–3 → 122–125. Issue #172 was 125 placeholders vs 124 embeds.
+    """
+    n_llm_h = int(n_llm_h)
+    n_llm_w = int(n_llm_w)
+    pad_h = n_llm_h % 2
+    rows = n_llm_h + pad_h
+    row_len = n_llm_w + 1
+    pad_last = (rows // 2 * row_len % 2) * 2
+    core = n_llm_h * row_len + row_len * pad_h
+    return compress_pad_tokens(start_pos) + 1 + core + pad_last + 1
+
+
+def salt_mm_image_hash(digest: str, num_tokens: int) -> str:
+    """Fold block length into vLLM's content-only mm hash (issue #172)."""
+    return f"{digest}:{LAYOUT_HASH_TAG}{int(num_tokens)}"
+
+
+def token_routing_kind(input_tokens: Any, image_token_id: int = IMAGE_TOKEN_ID) -> str:
+    """Classify a token row as text-only, image-only, or mixed (issue #175)."""
+    if input_tokens is None:
+        return "text"
+    if hasattr(input_tokens, "reshape") and hasattr(input_tokens, "numel"):
+        flat = input_tokens.reshape(-1)
+        n = int(flat.numel())
+        if n == 0:
+            return "text"
+        n_img = int((flat == int(image_token_id)).sum().item())
+    else:
+        seq = list(input_tokens)
+        n = len(seq)
+        if n == 0:
+            return "text"
+        n_img = sum(1 for tok in seq if int(tok) == int(image_token_id))
+    if n_img == 0:
+        return "text"
+    if n_img == n:
+        return "image"
+    return "mixed"
 
 
 def is_vision_exp_weight_name(name: str) -> bool:
@@ -326,7 +381,7 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
     """Builds the N-layout token types (final order) and the aligner-row order for IMAGE slots."""
     import torch
 
-    compress_pad = COMPRESS_PAD_TO - 1 - start_pos % COMPRESS_PAD_TO
+    compress_pad = compress_pad_tokens(start_pos)
     pad_h = n_llm_h % 2
     rows = n_llm_h + pad_h
     row_len = n_llm_w + 1

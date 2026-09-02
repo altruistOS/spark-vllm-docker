@@ -26,9 +26,11 @@ from vllm.multimodal.processing import (
 from .image_processor import (
     IMAGE_PAD,
     IMAGE_PLACEHOLDER,
+    IMAGE_TOKEN_ID,
     as_pil,
     build_image_block,
     pil_to_patches,
+    salt_mm_image_hash,
     vision_args_from_config,
 )
 
@@ -42,8 +44,35 @@ def _image_token_id(tokenizer) -> int:
     vocab = getattr(tokenizer, "get_vocab", lambda: {})()
     if IMAGE_PLACEHOLDER in vocab:
         return int(vocab[IMAGE_PLACEHOLDER])
-    # Vision-Exp added-token id (vocab_size 129280; placeholder is in the tail).
-    return 129264
+    return IMAGE_TOKEN_ID
+
+
+def _as_int(value: Any) -> int:
+    raw = value.data if hasattr(value, "data") else value
+    if hasattr(raw, "reshape"):
+        return int(raw.reshape(-1)[0].item())
+    return int(raw)
+
+
+def _salt_image_mm_hashes(hashes: Any, mm_kwargs: Any) -> Any:
+    """vLLM hashes raw image bytes. Block length depends on start_pos % 4."""
+    if not hashes or "image" not in hashes:
+        return hashes
+    try:
+        items = mm_kwargs["image"]
+    except Exception:
+        return hashes
+    salted = []
+    for i, digest in enumerate(hashes["image"]):
+        try:
+            ntok = _as_int(items[i]["num_tokens"])
+        except Exception:
+            salted.append(digest)
+            continue
+        salted.append(salt_mm_image_hash(str(digest), ntok))
+    out = dict(hashes)
+    out["image"] = salted
+    return out
 
 
 def _collect_images(mm_data: Mapping[str, object]) -> list[Any]:
@@ -115,8 +144,15 @@ class DeepseekV4VisionExpMultiModalProcessor(
     ) -> tuple[list[int], Any, bool]:
         # compress_pad depends on the expanded token position of each image,
         # so a content-only processor cache would reuse the wrong layout.
+        # The GPU encoder cache is also keyed by image bytes; salt hashes with
+        # num_tokens so a 40×19 grid at start_pos%4==0 (125) cannot reuse a
+        # block encoded at %4==1 (124). See issue #172.
         if inputs.mm_data_items.get_count("image", strict=False) > 0:
-            return self._apply_hf_processor(inputs, timing_ctx)
+            prompt_ids, mm_info, applied = self._apply_hf_processor(inputs, timing_ctx)
+            salted = _salt_image_mm_hashes(mm_info.hashes, mm_info.kwargs)
+            if salted is not mm_info.hashes:
+                mm_info = mm_info._replace(hashes=salted)
+            return prompt_ids, mm_info, applied
         return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
     def _call_hf_processor(
@@ -241,34 +277,10 @@ class DeepseekV4VisionExpMultiModalProcessor(
 
         def get_replacement(item_idx: int):
             item = out_mm_kwargs["image"][item_idx]
-            raw = item["num_tokens"]
-            num_tokens = raw.data if hasattr(raw, "data") else raw
-            if hasattr(num_tokens, "reshape"):
-                num_tokens = int(num_tokens.reshape(-1)[0].item())
-            else:
-                num_tokens = int(num_tokens)
+            num_tokens = _as_int(item["num_tokens"])
             if num_tokens <= 0:
                 raise ValueError(f"Image {item_idx} produced 0 vision tokens")
-            # vLLM's scheduler counts ONE extra image placeholder for this
-            # N-layout block than the block actually emits (observed crash:
-            # block=356 but placeholders=357 -> fatal mismatch). VLLM-EXP
-            # therefore inserts `delta` fewer placeholder tokens so the final
-            # prompt holds exactly `num_tokens` placeholders == block length.
-            # Tunable via env so it can be flipped without an image change:
-            #   VISION_EXP_PLACEHOLDER_DELTA=0  -> insert num_tokens (old broken)
-            #   VISION_EXP_PLACEHOLDER_DELTA=1  -> insert num_tokens-1 (default)
-            import os as _vllm_exp_os
-            _delta = int(_vllm_exp_os.environ.get("VISION_EXP_PLACEHOLDER_DELTA", "1"))
-            _n = max(1, num_tokens - _delta)
-            _dbg = int(_vllm_exp_os.environ.get("VISION_EXP_DEBUG", "0"))
-            if _dbg:
-                print(
-                    f"[vision-exp] item {item_idx}: num_tokens={num_tokens} "
-                    f"delta={_delta} -> placeholders={_n} (block={num_tokens})",
-                    file=__import__("sys").stderr,
-                    flush=True,
-                )
-            return [image_token_id] * _n
+            return [image_token_id] * num_tokens
 
         return [
             PromptReplacement(

@@ -45,6 +45,11 @@ env:
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  # Stateful previous_response_id continuation: keep the Responses API
+  # store ON so Codex references prior responses by id instead of replaying
+  # the whole history (which would re-send every image and hit
+  # --limit-mm-per-prompt on long agent sessions).
+  VLLM_ENABLE_RESPONSES_API_STORE: "1"
   # Vision-Exp block length depends on start_pos%4; the upstream processor
   # (issue #172) salts the encoder cache with num_tokens and rejects a
   # placeholder/embedding count mismatch before merge, so no manual delta.
@@ -69,7 +74,7 @@ command: |
     --enable-chunked-prefill \
     --async-scheduling \
     --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \
-    --limit-mm-per-prompt '{{"image":8}}' \
+    --limit-mm-per-prompt '{{"image":16}}' \
     --distributed-executor-backend mp \
     --moe-backend flashinfer_b12x \
     --attention-backend flashinfer \

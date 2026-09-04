@@ -31,7 +31,7 @@ defaults:
   host: 0.0.0.0
   tensor_parallel: 2
   gpu_memory_utilization: 0.80
-  max_model_len: 524288
+  max_model_len: 1048576
   max_num_seqs: 6
   max_num_batched_tokens: 8192
   mtp_num_tokens: 6
@@ -51,6 +51,9 @@ env:
   # the whole history (which would re-send every image and hit
   # --limit-mm-per-prompt on long agent sessions).
   VLLM_ENABLE_RESPONSES_API_STORE: "1"
+  # Bound the opt-in Responses terminal store (upstream issue #62).
+  # Recreate all ranks to change; state is lost on process restart.
+  DSPARK_RESPONSES_STORE_MAX_ENTRIES: "256"
   # Targeted Codex / stability runtime hotfixes (mods/dsv4-runtime-hotfixes):
   # pin the in-flight partial-prefill cap to 1 (upstream 2660d31 default) and
   # enable the opt-in Codex responses-history + sub-agent message shims.

@@ -19,6 +19,8 @@
 #     hotfix-dsv4-issue27-partial-prefill-concurrency.py  (in-flight prefill cap)
 #     hotfix-dsv4-issue43-decode-fairness-and-diag.py     (decode fairness)
 #     hotfix-dsv4-issue133-triton-specialization.py       (JIT reliability)
+#     hotfix-dsv4-nvfp4-ds-mla-long-context.py            (issue22: nvfp4 fast KV path)
+#     hotfix-dsv4-responses-store.py                      (issue62: bounded store, gate: STORE=1)
 #
 # Runs inside the container (CWD = this mod dir) on EVERY node, before exec.
 set -euo pipefail
@@ -35,7 +37,9 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-dsv4-issue55-tool-truncation.py
     hotfix-dsv4-issue133-triton-specialization.py
     hotfix-vllm-issue138-responses-history.py
-    hotfix-vllm-codex-agent-message.py)
+    hotfix-vllm-codex-agent-message.py
+    hotfix-dsv4-nvfp4-ds-mla-long-context.py
+    hotfix-dsv4-responses-store.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do
@@ -72,5 +76,20 @@ python3 /opt/hotfix-dsv4-issue43-decode-fairness-and-diag.py
 log "issue43 applied"
 python3 /opt/hotfix-dsv4-issue133-triton-specialization.py
 log "issue133 applied"
+
+# issue22: route nvfp4_ds_mla KV through the fast FP8 MLA kernel path.
+# Required for usable long (>600K-token) context; without it the slow bf16
+# path makes 1M context ~16x slower and appears to hang.
+python3 /opt/hotfix-dsv4-nvfp4-ds-mla-long-context.py
+log "issue22 applied"
+
+# issue62: bound the opt-in Responses terminal store so stateful
+# previous_response_id continuation does not grow memory unbounded.
+if [ "${VLLM_ENABLE_RESPONSES_API_STORE:-0}" = "1" ]; then
+    python3 /opt/hotfix-dsv4-responses-store.py
+    log "bounded responses store applied"
+else
+    log "skip bounded responses store (VLLM_ENABLE_RESPONSES_API_STORE != 1)"
+fi
 
 echo "[dsv4-runtime-hotfixes] done"

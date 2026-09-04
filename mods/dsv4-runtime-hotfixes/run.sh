@@ -83,13 +83,16 @@ log "issue133 applied"
 python3 /opt/hotfix-dsv4-nvfp4-ds-mla-long-context.py
 log "issue22 applied"
 
-# issue62: bound the opt-in Responses terminal store so stateful
+# issue62: bound the Responses terminal store so stateful
 # previous_response_id continuation does not grow memory unbounded.
-if [ "${VLLM_ENABLE_RESPONSES_API_STORE:-0}" = "1" ]; then
-    python3 /opt/hotfix-dsv4-responses-store.py
-    log "bounded responses store applied"
-else
-    log "skip bounded responses store (VLLM_ENABLE_RESPONSES_API_STORE != 1)"
-fi
+# Applied UNCONDITIONALLY: eugr exports the recipe env block (incl.
+# VLLM_ENABLE_RESPONSES_API_STORE=1) only on the `exec vllm serve` line, which
+# runs AFTER this mod, so the previous `VLLM_ENABLE_RESPONSES_API_STORE=1` gate
+# never saw it here and silently skipped the patch (store was left unbounded).
+# The patch is hash-verified/idempotent and only activates its cap logic when
+# the serving code's enable_store is true, so applying it unconditionally is safe.
+python3 /opt/hotfix-dsv4-responses-store.py
+log "bounded responses store applied"
+
 
 echo "[dsv4-runtime-hotfixes] done"

@@ -1,0 +1,76 @@
+#!/bin/bash
+#
+# mods/dsv4-runtime-hotfixes — DSpark runtime mod: targeted Codex / stability
+# hotfixes for the DeepSeek-V4-Flash-Vision-Exp deployment.
+#
+# Translated from the MiaAI-Lab reference boot sequence
+# (DeepSeek-v4-Flash-DSpark-2x-DGX-Spark @ 2660d31) onto the eugr
+# single-container recipe/mod surface. This mod applies ONLY the subset of
+# upstream runtime hotfixes that matter for a Codex agentic vision path and
+# for stability under concurrent / long-prefill load. It deliberately omits the
+# pure-throughput hotfixes (skip-topk, mtp-buffer, adaptive-chunk,
+# replicate-markov, sp-indexer, deepgemm, ...) to stay lean.
+#
+#   Staged + run before `vllm serve` on EVERY node:
+#     hotfix-encoding-dsv4-issue21.py                     (dict tool args)
+#     hotfix-dsv4-issue55-tool-truncation.py              (tool-call truncation)
+#     hotfix-vllm-issue138-responses-history.py           (gate: ISSUE138=1)
+#     hotfix-vllm-codex-agent-message.py                  (gate: CODEX...=1)
+#     hotfix-dsv4-issue27-partial-prefill-concurrency.py  (in-flight prefill cap)
+#     hotfix-dsv4-issue43-decode-fairness-and-diag.py     (decode fairness)
+#     hotfix-dsv4-issue133-triton-specialization.py       (JIT reliability)
+#
+# Runs inside the container (CWD = this mod dir) on EVERY node, before exec.
+set -euo pipefail
+
+PY_ROOT="${PYTHON_ROOT:-/usr/local/lib/python3.12/dist-packages}"
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log() { echo "[dsv4-runtime-hotfixes] $*"; }
+die() { log "FATAL: $*" >&2; exit 1; }
+
+HF=(hotfix-encoding-dsv4-issue21.py
+    hotfix-dsv4-issue27-partial-prefill-concurrency.py
+    hotfix-dsv4-issue43-decode-fairness-and-diag.py
+    hotfix-dsv4-issue55-tool-truncation.py
+    hotfix-dsv4-issue133-triton-specialization.py
+    hotfix-vllm-issue138-responses-history.py
+    hotfix-vllm-codex-agent-message.py)
+
+# --- 1. Stage hotfix scripts into /opt ---------------------------------------
+for f in "${HF[@]}"; do
+    [ -f "$MOD_DIR/$f" ] || die "missing $f"
+    cp "$MOD_DIR/$f" "/opt/$f"
+done
+log "staged ${#HF[@]} runtime hotfixes"
+
+# --- 2. Apply in reference order/gate ----------------------------------------
+# issue21 needs the Vision-Exp DSV4 encoder present (the vision mod copies it).
+ENC="$PY_ROOT/vllm/tokenizers/deepseek_v4_encoding.py"
+if [ -f "$ENC" ]; then
+    python3 /opt/hotfix-encoding-dsv4-issue21.py
+    log "issue21 applied"
+else
+    log "WARN: $ENC missing (vision mod did not install encoder); skip issue21"
+fi
+
+python3 /opt/hotfix-dsv4-issue55-tool-truncation.py
+log "issue55 applied"
+
+if [ "${DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT:-0}" = "1" ]; then
+    python3 /opt/hotfix-vllm-issue138-responses-history.py
+    log "issue138 applied"
+fi
+if [ "${DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT:-0}" = "1" ]; then
+    python3 /opt/hotfix-vllm-codex-agent-message.py
+    log "codex agent_message applied"
+fi
+
+python3 /opt/hotfix-dsv4-issue27-partial-prefill-concurrency.py
+log "issue27 applied"
+python3 /opt/hotfix-dsv4-issue43-decode-fairness-and-diag.py
+log "issue43 applied"
+python3 /opt/hotfix-dsv4-issue133-triton-specialization.py
+log "issue133 applied"
+
+echo "[dsv4-runtime-hotfixes] done"

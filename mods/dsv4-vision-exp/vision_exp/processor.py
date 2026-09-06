@@ -88,7 +88,15 @@ def _collect_images(mm_data: Mapping[str, object]) -> list[Any]:
 
 class DeepseekV4VisionExpProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 16}
+        # No model-imposed per-prompt image COUNT cap.  Codex drives the
+        # Responses endpoint statelessly: it replays the whole conversation on
+        # every turn, so all images accumulated in a session are re-sent and
+        # re-counted.  A hard-coded count would therefore be hit as images pile
+        # up (the 8 -> 16 -> ... wall), independent of --limit-mm-per-prompt
+        # (vLLM clamps to min(user_limit, supported_limit)).  The serving-side
+        # --limit-mm-per-prompt stays the single safety valve; the real binder
+        # is max_model_len / image tokens (384), not image COUNT.
+        return {"image": None}
 
     def get_hf_processor(self, **kwargs: object):
         raise RuntimeError(

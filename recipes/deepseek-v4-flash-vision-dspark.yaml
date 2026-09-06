@@ -46,10 +46,10 @@ env:
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
-  # Stateful previous_response_id continuation: keep the Responses API
-  # store ON so Codex references prior responses by id instead of replaying
-  # the whole history (which would re-send every image and hit
-  # --limit-mm-per-prompt on long agent sessions).
+  # Codex drives /responses statelessly (no previous_response_id), so it
+  # REPLAYS the full conversation on every turn and re-sends every image ever
+  # attached.  Keeping the store ON is harmless and helps clients that DO use
+  # previous_response_id, but it does NOT stop image accumulation here.
   VLLM_ENABLE_RESPONSES_API_STORE: "1"
   # Bound the opt-in Responses terminal store (upstream issue #62).
   # Recreate all ranks to change; state is lost on process restart.
@@ -84,7 +84,7 @@ command: |
     --enable-chunked-prefill \
     --async-scheduling \
     --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \
-    --limit-mm-per-prompt '{{"image":16}}' \
+    --limit-mm-per-prompt '{{"image":1024}}' \
     --distributed-executor-backend mp \
     --moe-backend flashinfer_b12x \
     --attention-backend flashinfer \

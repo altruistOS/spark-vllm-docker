@@ -14,8 +14,8 @@
 #   Staged + run before `vllm serve` on EVERY node:
 #     hotfix-encoding-dsv4-issue21.py                     (dict tool args)
 #     hotfix-dsv4-issue55-tool-truncation.py              (tool-call truncation)
-#     hotfix-vllm-issue138-responses-history.py           (gate: ISSUE138=1)
-#     hotfix-vllm-codex-agent-message.py                  (gate: CODEX...=1)
+#     hotfix-vllm-issue138-responses-history.py           (Codex stateless history replay)
+#     hotfix-vllm-codex-agent-message.py                  (Codex agent_message compat)
 #     hotfix-dsv4-issue27-partial-prefill-concurrency.py  (in-flight prefill cap)
 #     hotfix-dsv4-issue43-decode-fairness-and-diag.py     (decode fairness)
 #     hotfix-dsv4-issue133-triton-specialization.py       (JIT reliability)
@@ -67,14 +67,17 @@ fi
 python3 /opt/hotfix-dsv4-issue55-tool-truncation.py
 log "issue55 applied"
 
-if [ "${DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT:-0}" = "1" ]; then
-    python3 /opt/hotfix-vllm-issue138-responses-history.py
-    log "issue138 applied"
-fi
-if [ "${DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT:-0}" = "1" ]; then
-    python3 /opt/hotfix-vllm-codex-agent-message.py
-    log "codex agent_message applied"
-fi
+# issue138: accept Codex's stateless type-less assistant full-history replay.
+# codex-agent-message: convert the evidenced Codex agent_message output item.
+# Both were gated on DSPARK_ENABLE_* env vars, but eugr exports the recipe env
+# block only at `exec vllm serve` time (after this mod), so those gates never
+# reached run.sh and the two patches were silently skipped. They are idempotent/
+# hash-verified and the recipe sets the gates to 1, so apply unconditionally
+# (issue62 / new-upstream precedent).
+python3 /opt/hotfix-vllm-issue138-responses-history.py
+log "issue138 applied"
+python3 /opt/hotfix-vllm-codex-agent-message.py
+log "codex agent_message applied"
 
 python3 /opt/hotfix-dsv4-issue27-partial-prefill-concurrency.py
 log "issue27 applied"

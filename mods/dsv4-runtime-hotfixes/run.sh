@@ -21,6 +21,9 @@
 #     hotfix-dsv4-issue133-triton-specialization.py       (JIT reliability)
 #     hotfix-dsv4-nvfp4-ds-mla-long-context.py            (issue22: nvfp4 fast KV path)
 #     hotfix-dsv4-responses-store.py                      (issue62: bounded store, gate: STORE=1)
+#     hotfix-dsv4-issue144-effort-align.py                (effort directive -> cross-bucket prefix cache)
+#     hotfix-vllm-rope-swa-fix.py                         (sparse-SWA layers use plain RoPE, not YaRN)
+#     hotfix-vllm-dspark-swa-prefix.py                    (recompute draft SWA window on prefix-cache hit)
 #
 # Runs inside the container (CWD = this mod dir) on EVERY node, before exec.
 set -euo pipefail
@@ -39,7 +42,10 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-vllm-issue138-responses-history.py
     hotfix-vllm-codex-agent-message.py
     hotfix-dsv4-nvfp4-ds-mla-long-context.py
-    hotfix-dsv4-responses-store.py)
+    hotfix-dsv4-responses-store.py
+    hotfix-dsv4-issue144-effort-align.py
+    hotfix-vllm-rope-swa-fix.py
+    hotfix-vllm-dspark-swa-prefix.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do
@@ -93,6 +99,34 @@ log "issue22 applied"
 # the serving code's enable_store is true, so applying it unconditionally is safe.
 python3 /opt/hotfix-dsv4-responses-store.py
 log "bounded responses store applied"
+
+# --- 3. New upstream (>= 957890a) opt-in hotfixes -----------------------------
+# These are gated in the reference compose entrypoint via DSPARK_ENABLE_* env.
+# In eugr the recipe `env:` block is exported only on the `exec vllm serve`
+# line, AFTER this mod runs, so those gates never reach this script.  The three
+# patches are source-exact + version-pinned (vLLM 752a3a504, the image's build)
+# and idempotent, so applying them UNCONDITIONALLY is safe (issue62 precedent).
+# Order: issue144 patches the encoder (must be after issue21 / the vision mod's
+# encoder install); rope-swa and dspark-swa-prefix are independent, and
+# dspark-swa-prefix patches scheduler.py co-owned by issue27 (already applied).
+
+# issue144: relocate the reasoning-effort directive after the leading system
+# block so prefix-cache blocks are shared across effort buckets (high/max/low).
+if [ -f "$PY_ROOT/vllm/tokenizers/deepseek_v4_encoding.py" ]; then
+    python3 /opt/hotfix-dsv4-issue144-effort-align.py
+    log "issue144 effort-align applied"
+else
+    log "WARN: encoder missing; skip issue144 effort-align"
+fi
+
+# rope-swa: sparse-SWA layers use plain RoPE, not YaRN (upstream vllm#54815).
+python3 /opt/hotfix-vllm-rope-swa-fix.py
+log "rope-swa fix applied"
+
+# dspark-swa-prefix: on a prefix-cache hit, cap the cached length so the DSpark
+# draft recomputes its sliding window (Anemll dspark-vllm-gx10#2).
+python3 /opt/hotfix-vllm-dspark-swa-prefix.py
+log "dspark-swa-prefix applied"
 
 
 echo "[dsv4-runtime-hotfixes] done"

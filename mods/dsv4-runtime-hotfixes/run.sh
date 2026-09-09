@@ -14,6 +14,8 @@
 #   Staged + run before `vllm serve` on EVERY node:
 #     hotfix-encoding-dsv4-issue21.py                     (dict tool args)
 #     hotfix-dsv4-issue55-tool-truncation.py              (tool-call truncation)
+#     hotfix-vllm-issue136-xgrammar-termination.py       (issue136+#210: XGrammar FSM desync / zero-progress)
+#     hotfix-vllm-issue191-toolcall-failclosed.py        (issue191: fail-closed tool_choice + thinking-off fallback)
 #     hotfix-vllm-issue138-responses-history.py           (Codex stateless history replay)
 #     hotfix-vllm-codex-agent-message.py                  (Codex agent_message compat)
 #     hotfix-dsv4-issue27-partial-prefill-concurrency.py  (in-flight prefill cap)
@@ -45,7 +47,8 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-dsv4-responses-store.py
     hotfix-dsv4-issue144-effort-align.py
     hotfix-vllm-rope-swa-fix.py
-    hotfix-vllm-dspark-swa-prefix.py)
+    hotfix-vllm-issue136-xgrammar-termination.py
+    hotfix-vllm-issue191-toolcall-failclosed.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do
@@ -66,6 +69,20 @@ fi
 
 python3 /opt/hotfix-dsv4-issue55-tool-truncation.py
 log "issue55 applied"
+
+# issue136+#210: post-reasoning draft window validates each speculative token
+# before accept (backport chain on backend_xgrammar.py + structured_output),
+# which fixes spurious "Failed to advance FSM" / zero-progress stalls. Applied
+# unconditionally: source-exact + version-pinned + idempotent (issue62 precedent).
+python3 /opt/hotfix-vllm-issue136-xgrammar-termination.py
+log "issue136 xgrammar termination applied"
+
+# issue191: fail-closed named/required tool_choice + thinking-off fallback on the
+# last retry when reasoning outran max_tokens (finish_reason=length & a zero or
+# partial tool call). MUST run after issue55 (expects its post-patch serving.py
+# identity). env knobs (DSPARK_ISSUE191_*) are read at serve time from recipe env.
+python3 /opt/hotfix-vllm-issue191-toolcall-failclosed.py
+log "issue191 toolcall fail-closed applied"
 
 # issue138: accept Codex's stateless type-less assistant full-history replay.
 # codex-agent-message: convert the evidenced Codex agent_message output item.

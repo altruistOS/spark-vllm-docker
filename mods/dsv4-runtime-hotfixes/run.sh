@@ -16,6 +16,7 @@
 #     hotfix-dsv4-issue55-tool-truncation.py              (tool-call truncation)
 #     hotfix-vllm-issue136-xgrammar-termination.py       (issue136+#210: XGrammar FSM desync / zero-progress)
 #     hotfix-vllm-issue191-toolcall-failclosed.py        (issue191: fail-closed tool_choice + thinking-off fallback)
+#     hotfix-dsv4-issue31-v2-thinking-budget-gpu.py      (issue31/66: V2 GPU thinking_token_budget)
 #     hotfix-vllm-issue138-responses-history.py           (Codex stateless history replay)
 #     hotfix-vllm-codex-agent-message.py                  (Codex agent_message compat)
 #     hotfix-dsv4-issue27-partial-prefill-concurrency.py  (in-flight prefill cap)
@@ -48,7 +49,8 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-dsv4-issue144-effort-align.py
     hotfix-vllm-rope-swa-fix.py
     hotfix-vllm-issue136-xgrammar-termination.py
-    hotfix-vllm-issue191-toolcall-failclosed.py)
+    hotfix-vllm-issue191-toolcall-failclosed.py
+    hotfix-dsv4-issue31-v2-thinking-budget-gpu.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do
@@ -83,6 +85,15 @@ log "issue136 xgrammar termination applied"
 # identity). env knobs (DSPARK_ISSUE191_*) are read at serve time from recipe env.
 python3 /opt/hotfix-vllm-issue191-toolcall-failclosed.py
 log "issue191 toolcall fail-closed applied"
+
+# issue31/#66: enable the V2 thinking_token_budget on the GPU so reasoning can
+# be hard-capped per request, leaving the rest of max_tokens for the answer or
+# tool call (fixes Max-reasoning outrunning the whole budget -> content:null /
+# finish_reason=length). NOTE: this only makes the server ACCEPT the field; the
+# CLIENT must still send thinking_token_budget (no omit-field default). Applied
+# unconditionally: source-exact + idempotent.
+python3 /opt/hotfix-dsv4-issue31-v2-thinking-budget-gpu.py
+log "issue31 v2 thinking_token_budget enabled"
 
 # issue138: accept Codex's stateless type-less assistant full-history replay.
 # codex-agent-message: convert the evidenced Codex agent_message output item.

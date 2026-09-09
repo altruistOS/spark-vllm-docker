@@ -77,12 +77,6 @@ env:
   DSPARK_ISSUE191_TOOLCALL_RETRIES: "2"
   DSPARK_ISSUE191_TOOLCALL_MODE: "failclosed"
   DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK: "1"
-  # issue31/66: enable V2 GPU thinking_token_budget so reasoning can be hard-
-  # capped per request, leaving max_tokens for the answer/tool call (fixes
-  # Max-reasoning outrunning the whole budget). NOTE: the server only ACCEPTS the
-  # field -- the CLIENT must still send thinking_token_budget (no omit-field
-  # default), e.g. via the CC Switch provider's localProxyBodyOverride.
-  DSPARK_ENABLE_ISSUE31_GPU_HOTFIX: "1"
   # Vision-Exp block length depends on start_pos%4; the upstream processor
   # (issue #172) salts the encoder cache with num_tokens and rejects a
   # placeholder/embedding count mismatch before merge, so no manual delta.

@@ -48,7 +48,8 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-dsv4-issue144-effort-align.py
     hotfix-vllm-rope-swa-fix.py
     hotfix-vllm-issue136-xgrammar-termination.py
-    hotfix-vllm-issue191-toolcall-failclosed.py)
+    hotfix-vllm-issue191-toolcall-failclosed.py
+    hotfix-vllm-dspark-swa-prefix.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do

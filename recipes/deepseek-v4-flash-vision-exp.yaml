@@ -15,7 +15,7 @@ cluster_only: true
 
 mods: 
   - mods/instanttensor-hybrid-draft-loader
-#   - mods/drop-caches
+  - mods/drop-caches
 
 defaults:
   port: 8000

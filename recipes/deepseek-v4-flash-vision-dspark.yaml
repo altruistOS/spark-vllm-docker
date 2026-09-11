@@ -98,6 +98,7 @@ command: |
     --long-prefill-token-threshold 1024 \
     --max-cudagraph-capture-size {cudagraph_capture_size} \
     --enable-prefix-caching \
+    --enable-prompt-tokens-details \
     --enable-chunked-prefill \
     --async-scheduling \
     --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \

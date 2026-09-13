@@ -53,8 +53,15 @@ env:
   # --- 0.29 B12X image preflight requirements (0rand README; do NOT regress) ---
   VLLM_USE_AOT_COMPILE: "0"
   VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+  # --- Offline HF (DGX has no HF internet). Without HF_HUB_OFFLINE the 0.29
+  #     image tries to reach huggingface.co during model load and fails with
+  #     "repo_utils.py Error retrieving file list: Network is unreachable"
+  #     (observed 2026-09-13). These force a local-cache offline load, same as
+  #     the vision-dspark recipe. ---
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HOME: "/root/.cache/huggingface"
   # --- 0rand .env special: route HF cache to a complete hub tree if needed ---
-  # HF_HOME: "/root/.cache/huggingface"   # default eugr location
   # HF_CACHE_DIR: "/root/models/deepseek-ai"  # override to a complete tree
 
 command: |

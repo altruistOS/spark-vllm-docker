@@ -8,28 +8,8 @@ CONTAINER_WORKSPACE_DIR="/workspace"
 CONTAINER_EXEC_SCRIPT="$CONTAINER_WORKSPACE_DIR/exec-script.sh"
 # Modify these if you want to pass additional docker args or set VLLM_SPARK_EXTRA_DOCKER_ARGS variable
 DOCKER_ARGS="-e NCCL_IGNORE_CPU_AFFINITY=1"
-# [memleak fix] Drop the docker-layer hard-coded expandable CUDA segments.
-# On GB10 unified memory (CPU+GPU share the 128GB pool) expandable_segments
-# keep their physical footprint and only grow during idle, which is what
-# drained available RAM and triggered the idle auto-shutdown + the
-# "ibv_reg_mr_iova2 Cannot allocate memory" redeploy failure. The recipe no
-# longer sets PYTORCH_CUDA_ALLOC_CONF either; PyTorch default allocator wins.
+DOCKER_ARGS="$DOCKER_ARGS -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 DOCKER_ARGS="$DOCKER_ARGS -v $HF_CACHE_DIR:/root/.cache/huggingface"
-# [NCCL/RDMA fix] NCCL registers its RoCE/IB proxy send/recv buffers through
-# ibv_reg_mr (DMA-BUF path); every such registration is charged against the
-# process RLIMIT_MEMLOCK (locked-memory) limit. Docker does NOT inherit the
-# host's PAM/systemd "unlimited" memlock, so the container came up with a
-# ~8MB default, and the very first NCCL IB buffer registration failed with
-# "Cannot allocate memory" -> cross-node all-reduce died -> engine init
-# aborted. Raise the container memlock ceiling to match the host.
-# This node's docker clamps --ulimit to a NUMERIC value (it rejects the
-# literal "infinity", see strconv.ParseInt: parsing "infinity": invalid
-# syntax), which is exactly why the container fell back to the low ~8MB
-# default. Use a large numeric ceiling (~256GiB) so NCCL never trips
-# RLIMIT_MEMLOCK; the hard cap is still bound by the host's own unlimited
-# memlock via PAM/systemd. Override-able (e.g.
-# VLLM_SPARK_MEMLOCK_ULIMIT=68719476802) via VLLM_SPARK_EXTRA_DOCKER_ARGS.
-DOCKER_ARGS="$DOCKER_ARGS --ulimit memlock=${VLLM_SPARK_MEMLOCK_ULIMIT:-274877906944}:${VLLM_SPARK_MEMLOCK_ULIMIT:-274877906944}"
 
 # Append additional arguments from environment variable
 if [[ -n "$VLLM_SPARK_EXTRA_DOCKER_ARGS" ]]; then

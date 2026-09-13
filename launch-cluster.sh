@@ -8,8 +8,23 @@ CONTAINER_WORKSPACE_DIR="/workspace"
 CONTAINER_EXEC_SCRIPT="$CONTAINER_WORKSPACE_DIR/exec-script.sh"
 # Modify these if you want to pass additional docker args or set VLLM_SPARK_EXTRA_DOCKER_ARGS variable
 DOCKER_ARGS="-e NCCL_IGNORE_CPU_AFFINITY=1"
-DOCKER_ARGS="$DOCKER_ARGS -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+# [memleak fix] Drop the docker-layer hard-coded expandable CUDA segments.
+# On GB10 unified memory (CPU+GPU share the 128GB pool) expandable_segments
+# keep their physical footprint and only grow during idle, which is what
+# drained available RAM and triggered the idle auto-shutdown + the
+# "ibv_reg_mr_iova2 Cannot allocate memory" redeploy failure. The recipe no
+# longer sets PYTORCH_CUDA_ALLOC_CONF either; PyTorch default allocator wins.
 DOCKER_ARGS="$DOCKER_ARGS -v $HF_CACHE_DIR:/root/.cache/huggingface"
+# [NCCL/RDMA fix] NCCL registers its RoCE/IB proxy send/recv buffers through
+# ibv_reg_mr (DMA-BUF path); every such registration is charged against the
+# process RLIMIT_MEMLOCK (locked-memory) limit. Docker does NOT inherit the
+# host's PAM/systemd "unlimited" memlock, so the container came up with a
+# ~8MB default, and the very first NCCL IB buffer registration failed with
+# "Cannot allocate memory" -> cross-node all-reduce died -> engine init
+# aborted. Raise the container memlock ceiling to match the host.
+# Override-able (e.g. VLLM_SPARK_MEMLOCK_ULIMIT=64g) via the same
+# VLLM_SPARK_EXTRA_DOCKER_ARGS escape hatch below.
+DOCKER_ARGS="$DOCKER_ARGS --ulimit memlock=${VLLM_SPARK_MEMLOCK_ULIMIT:-infinity}:${VLLM_SPARK_MEMLOCK_ULIMIT:-infinity}"
 
 # Append additional arguments from environment variable
 if [[ -n "$VLLM_SPARK_EXTRA_DOCKER_ARGS" ]]; then

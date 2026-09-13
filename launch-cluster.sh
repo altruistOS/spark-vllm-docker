@@ -22,9 +22,14 @@ DOCKER_ARGS="$DOCKER_ARGS -v $HF_CACHE_DIR:/root/.cache/huggingface"
 # ~8MB default, and the very first NCCL IB buffer registration failed with
 # "Cannot allocate memory" -> cross-node all-reduce died -> engine init
 # aborted. Raise the container memlock ceiling to match the host.
-# Override-able (e.g. VLLM_SPARK_MEMLOCK_ULIMIT=64g) via the same
-# VLLM_SPARK_EXTRA_DOCKER_ARGS escape hatch below.
-DOCKER_ARGS="$DOCKER_ARGS --ulimit memlock=${VLLM_SPARK_MEMLOCK_ULIMIT:-infinity}:${VLLM_SPARK_MEMLOCK_ULIMIT:-infinity}"
+# This node's docker clamps --ulimit to a NUMERIC value (it rejects the
+# literal "infinity", see strconv.ParseInt: parsing "infinity": invalid
+# syntax), which is exactly why the container fell back to the low ~8MB
+# default. Use a large numeric ceiling (~256GiB) so NCCL never trips
+# RLIMIT_MEMLOCK; the hard cap is still bound by the host's own unlimited
+# memlock via PAM/systemd. Override-able (e.g.
+# VLLM_SPARK_MEMLOCK_ULIMIT=68719476802) via VLLM_SPARK_EXTRA_DOCKER_ARGS.
+DOCKER_ARGS="$DOCKER_ARGS --ulimit memlock=${VLLM_SPARK_MEMLOCK_ULIMIT:-274877906944}:${VLLM_SPARK_MEMLOCK_ULIMIT:-274877906944}"
 
 # Append additional arguments from environment variable
 if [[ -n "$VLLM_SPARK_EXTRA_DOCKER_ARGS" ]]; then

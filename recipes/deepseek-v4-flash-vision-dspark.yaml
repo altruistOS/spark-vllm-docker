@@ -31,7 +31,7 @@ defaults:
   host: 0.0.0.0
   tensor_parallel: 2
   gpu_memory_utilization: 0.80
-  max_model_len: 1048576
+  max_model_len: auto  # was 1048576 (~1M) — unbounded KV/activation growth on GB10 unified memory drained RAM during idle; matches eugr official vision-exp recipe
   max_num_seqs: 6
   max_num_batched_tokens: 8192
   mtp_num_tokens: 6
@@ -44,7 +44,7 @@ env:
   VLLM_USE_FLASHINFER_SAMPLER: "1"
   VLLM_USE_B12X_MOE: "1"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  # PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # commented out — expandable CUDA segments never shrink their physical footprint (GB10 unified memory) and kept growing during idle; let PyTorch use its default caching allocator
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
   # Codex drives /responses statelessly (no previous_response_id), so it
   # REPLAYS the full conversation on every turn and re-sends every image ever
@@ -102,7 +102,7 @@ command: |
     --enable-chunked-prefill \
     --async-scheduling \
     --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \
-    --limit-mm-per-prompt '{{"image":1024}}' \
+    --limit-mm-per-prompt '{{"image":16}}' \
     --distributed-executor-backend mp \
     --moe-backend flashinfer_b12x \
     --attention-backend flashinfer \

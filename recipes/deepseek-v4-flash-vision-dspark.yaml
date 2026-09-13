@@ -1,0 +1,116 @@
+# Recipe: DeepSeek-V4-Flash-Vision-Exp (DSpark, native vision on Anemll)
+#
+# Native multimodal DeepSeek V4 Flash Vision-Exp on 2x DGX Spark via the
+# Anemll dspark-vllm-gx10:0.1.1 image: NVFP4 DS-MLA KV + DSpark speculative
+# decoding + a startup hotfix that loads the ViT/Aligner and registers the
+# OpenAI image_url processor. No Qwen3-VL sidecar needed.
+#
+# Model weights must already be cached on ALL nodes (HF_HUB_OFFLINE=1 at serve):
+#   hf download deepseek-ai/DeepSeek-V4-Flash-Vision-Exp   # uses cached refs/main (no hard revision pin, offline-safe)
+# Served model name differs from the text recipe -> use image_url in user
+# messages only; no video (GIF decodes as a still frame).
+#
+# Usage:
+#   ./run-recipe.sh deepseek-v4-flash-vision-dspark --no-ray --port 8888 -d
+#   (both nodes need the same image + HF cache; vision mod runs on every node)
+
+recipe_version: "1"
+name: DeepSeek-V4-Flash-DSpark-Vision-Exp
+description: DeepSeek V4 Flash Vision-Exp with NVFP4 DS-MLA KV + DSpark native image support on 2x DGX Spark
+
+model: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+container: ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+cluster_only: true
+mods:
+  - mods/drop-caches
+  - mods/dsv4-vision-exp
+  - mods/dsv4-runtime-hotfixes
+
+defaults:
+  port: 8888
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.80
+  max_model_len: auto  # was 1048576 (~1M) — unbounded KV/activation growth on GB10 unified memory drained RAM during idle; matches eugr official vision-exp recipe
+  max_num_seqs: 6
+  max_num_batched_tokens: 8192
+  mtp_num_tokens: 6
+  cudagraph_capture_size: 48
+  served_model_name: deepseek-v4-flash-vision-exp
+
+env:
+  HF_HOME: "/root/.cache/huggingface"
+  HF_HUB_OFFLINE: "1"
+  VLLM_USE_FLASHINFER_SAMPLER: "1"
+  VLLM_USE_B12X_MOE: "1"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  # PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # commented out — expandable CUDA segments never shrink their physical footprint (GB10 unified memory) and kept growing during idle; let PyTorch use its default caching allocator
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  # Codex drives /responses statelessly (no previous_response_id), so it
+  # REPLAYS the full conversation on every turn and re-sends every image ever
+  # attached.  Keeping the store ON is harmless and helps clients that DO use
+  # previous_response_id, but it does NOT stop image accumulation here.
+  VLLM_ENABLE_RESPONSES_API_STORE: "1"
+  # Bound the opt-in Responses terminal store (upstream issue #62).
+  # Recreate all ranks to change; state is lost on process restart.
+  DSPARK_RESPONSES_STORE_MAX_ENTRIES: "256"
+  # Targeted Codex / stability runtime hotfixes (mods/dsv4-runtime-hotfixes):
+  # pin the in-flight partial-prefill cap to 1 (upstream 2660d31 default) and
+  # enable the opt-in Codex responses-history + sub-agent message shims.
+  DSPARK_MAX_INFLIGHT_PREFILLS: "1"
+  DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT: "1"
+  DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT: "1"
+  # Upstream >= 957890a opt-in prefix-cache / SWA hotfixes
+  # (mods/dsv4-runtime-hotfixes): the mod applies them unconditionally because
+  # this env block is only exported at `vllm serve` time (after the mod), so
+  # these values document intent and are also honored by the serve process.
+  DSPARK_ENABLE_ISSUE144_EFFORT_ALIGN: "1"
+  DSPARK_ENABLE_ROPE_SWA_FIX: "1"
+  DSPARK_ENABLE_DSPARK_SWA_PREFIX: "1"
+  # Tool-call reliability under Max-reasoning (mods/dsv4-runtime-hotfixes).
+  # issue136+#210: XGrammar termination chain (spurious "Failed to advance FSM"
+  # / zero-progress stalls). issue191: fail-closed named/required tool_choice,
+  # and on the LAST retry regenerate with thinking OFF when reasoning outran
+  # max_tokens (finish_reason=length & a zero/partial tool call).
+  DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX: "1"
+  DSPARK_ENABLE_ISSUE191_TOOLCALL_FAILCLOSED: "1"
+  DSPARK_ISSUE191_TOOLCALL_RETRIES: "2"
+  DSPARK_ISSUE191_TOOLCALL_MODE: "failclosed"
+  DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK: "1"
+  # Vision-Exp block length depends on start_pos%4; the upstream processor
+  # (issue #172) salts the encoder cache with num_tokens and rejects a
+  # placeholder/embedding count mismatch before merge, so no manual delta.
+
+command: |
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --served-model-name {served_model_name} \
+    --trust-remote-code \
+    --port {port} \
+    --host {host} \
+    --tensor-parallel-size {tensor_parallel} \
+    --pipeline-parallel-size 1 \
+    --kv-cache-dtype nvfp4_ds_mla \
+    --block-size 256 \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --long-prefill-token-threshold 1024 \
+    --max-cudagraph-capture-size {cudagraph_capture_size} \
+    --enable-prefix-caching \
+    --enable-prompt-tokens-details \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --speculative-config '{{"method":"dspark","num_speculative_tokens":{mtp_num_tokens},"draft_sample_method":"probabilistic"}}' \
+    --limit-mm-per-prompt '{{"image":16}}' \
+    --distributed-executor-backend mp \
+    --moe-backend flashinfer_b12x \
+    --attention-backend flashinfer \
+    --enable-flashinfer-autotune \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --reasoning-config '{{"reasoning_parser":"deepseek_v4","reasoning_start_str":" thinking","reasoning_end_str":" response"}}' \
+    --default-chat-template-kwargs '{{"thinking":false}}' \
+    --generation-config vllm

@@ -20,22 +20,22 @@ Each PCIe 5 x4 link is represented by two Ethernet and two RoCE interfaces:
 
 ```bash
 eugr@spark:~$ ibdev2netdev
-rocep1s0f0 port 1 ==> enp1s0f0np0 (Down)
-rocep1s0f1 port 1 ==> enp1s0f1np1 (Up)
-roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Down)
-roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Up)
+roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Up)
+roceP2p1s0f1 port 1 ==> enP2p1s0f1np1 (Down)
+rocep1s0f0 port 1 ==> enp1s0f0np0 (Up)
+rocep1s0f1 port 1 ==> enp1s0f1np1 (Down)
 ```
 
 In this case, the single cable is plugged in the outermost QSFP port (the right one if looking from the back).
 This port has two pairs of "twins" associated with it:
 
-- Ethernet: `enp1s0f1np1` and `enP2p1s0f1np1`
-- RoCE/IB: `rocep1s0f1` and `roceP2p1s0f1`
+- Ethernet: `enp1s0f0np0` and `enP2p1s0f0np0`
+- RoCE/IB: `rocep1s0f0` and `roceP2p1s0f0`
 
 Each of the twins represents one PCIe x4 link and can provide up to 100G link speed.
 
-For vLLM, we need RDMA over RoCE, so Ethernet speed is not that important, that's why we can assign IP only to one of the ports - in this case `enp1s0f1np1`.
-However, in order to get full bandwidth in NCCL RDMA mode, we need to utilize **both** RoCE twins. It is achieved by setting `NCCL_IB_HCA` to both RoCE interfaces: `export NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1`
+For vLLM, we need RDMA over RoCE, so Ethernet speed is not that important, that's why we can assign IP only to one of the ports - in this case `enp1s0f0np0`.
+However, in order to get full bandwidth in NCCL RDMA mode, we need to utilize **both** RoCE twins. It is achieved by setting `NCCL_IB_HCA` to both RoCE interfaces: `export NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0`
 
 `./launch-cluster.sh` does this automatically, along with autodiscovery of interfaces, so as long as you set up your Ethernet interface properly, vLLM will utilize both RoCE twins.
 
@@ -274,13 +274,13 @@ chmod +x discover-sparks
 Run the receiver on `spark2` node:
 
 ```bash
-ib_write_bw -d rocep1s0f1 --report_gbits -q 4 -R --force-link IB
+ib_write_bw -d rocep1s0f0 --report_gbits -q 4 -R --force-link IB
 ```
 
 Then run on `spark`:
 
 ```bash
-$ ib_write_bw 192.168.177.12 -d rocep1s0f1 --report_gbits -q 4 -R --force-link IB
+$ ib_write_bw 192.168.177.12 -d rocep1s0f0 --report_gbits -q 4 -R --force-link IB
 ```
 
 ```
@@ -318,13 +318,13 @@ $ ib_write_bw 192.168.177.12 -d rocep1s0f1 --report_gbits -q 4 -R --force-link I
 Run the receiver on `spark2` node:
 
 ```bash
-ib_write_lat -d rocep1s0f1 --report_gbits -R --force-link IB
+ib_write_lat -d rocep1s0f0 --report_gbits -R --force-link IB
 ```
 
 Then run on `spark`:
 
 ```bash
-ib_write_lat 192.168.177.12 -d rocep1s0f1 --report_gbits -R --force-link IB
+ib_write_lat 192.168.177.12 -d rocep1s0f0 --report_gbits -R --force-link IB
 ```
 
 ```
@@ -383,10 +383,10 @@ Test on both nodes:
 
 ```bash
 # Set network interface environment variables (use your active interface)
-export UCX_NET_DEVICES=enp1s0f1np1
-export NCCL_SOCKET_IFNAME=enp1s0f1np1
-export OMPI_MCA_btl_tcp_if_include=enp1s0f1np1
-export NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1
+export UCX_NET_DEVICES=enp1s0f0np0
+export NCCL_SOCKET_IFNAME=enp1s0f0np0
+export OMPI_MCA_btl_tcp_if_include=enp1s0f0np0
+export NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0
 export NCCL_IB_DISABLE=0
 
 # Run the all_gather performance test across both nodes

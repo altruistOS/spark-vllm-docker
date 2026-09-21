@@ -34,7 +34,7 @@ defaults:
   max_model_len: auto  # was 1048576 (~1M) — unbounded KV/activation growth on GB10 unified memory drained RAM during idle; matches eugr official vision-exp recipe
   max_num_seqs: 6
   max_num_batched_tokens: 8192
-  mtp_num_tokens: 6
+  mtp_num_tokens: 5
   cudagraph_capture_size: 48
   served_model_name: deepseek-v4-flash-vision-exp
 
@@ -77,6 +77,10 @@ env:
   DSPARK_ISSUE191_TOOLCALL_RETRIES: "2"
   DSPARK_ISSUE191_TOOLCALL_MODE: "failclosed"
   DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK: "1"
+  # Issue #225 (vLLM #52645): recover a complete DSML <invoke> whose outer
+  # tool_calls opener was missing/corrupted; otherwise the whole invoke leaks
+  # into user-visible content and the agent loses the tool call. opt-in.
+  DSPARK_ENABLE_DSML_RECOVERY: "1"
   # Vision-Exp block length depends on start_pos%4; the upstream processor
   # (issue #172) salts the encoder cache with num_tokens and rejects a
   # placeholder/embedding count mismatch before merge, so no manual delta.
@@ -112,5 +116,5 @@ command: |
     --tokenizer-mode deepseek_v4 \
     --reasoning-parser deepseek_v4 \
     --reasoning-config '{{"reasoning_parser":"deepseek_v4","reasoning_start_str":" thinking","reasoning_end_str":" response"}}' \
-    --default-chat-template-kwargs '{{"thinking":false}}' \
+    --default-chat-template-kwargs '{{"thinking":true,"reasoning_effort":"max"}}' \
     --generation-config vllm

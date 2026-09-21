@@ -34,7 +34,7 @@ defaults:
   max_model_len: auto  # was 1048576 (~1M) — unbounded KV/activation growth on GB10 unified memory drained RAM during idle; matches eugr official vision-exp recipe
   max_num_seqs: 6
   max_num_batched_tokens: 8192
-  mtp_num_tokens: 5
+  mtp_num_tokens: 6
   cudagraph_capture_size: 48
   served_model_name: deepseek-v4-flash-vision-exp
 
@@ -116,5 +116,5 @@ command: |
     --tokenizer-mode deepseek_v4 \
     --reasoning-parser deepseek_v4 \
     --reasoning-config '{{"reasoning_parser":"deepseek_v4","reasoning_start_str":" thinking","reasoning_end_str":" response"}}' \
-    --default-chat-template-kwargs '{{"thinking":true,"reasoning_effort":"max"}}' \
+    --default-chat-template-kwargs '{{"thinking":false}}' \
     --generation-config vllm

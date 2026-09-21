@@ -11,6 +11,7 @@ ARG CUTLASS_DSL_VERSION=4.7.0
 ARG B12X_REPO=""
 ARG B12X_REF=""
 ARG B12X_CACHEBUST=""
+ARG B12X_FROM_PYPI=0
 
 # Empty fallback for ordinary remote-source builds. A caller may override this
 # stage with --build-context vllm_source=/path/to/checkout.
@@ -120,6 +121,8 @@ FROM base AS flashinfer-builder
 
 ARG FLASHINFER_CUDA_ARCH_LIST="12.1a"
 ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
+# The provider shim accepts the same space-separated dotted architectures.
+ENV FLASHINFER_JIT_CACHE_PROVIDER_ARCHS=${FLASHINFER_CUDA_ARCH_LIST}
 WORKDIR $VLLM_BASE_DIR
 ARG FLASHINFER_REF=main
 ARG FLASHINFER_BUILD_PYTHON=/usr/bin/python3
@@ -228,12 +231,11 @@ RUN set -eux; \
 
 
 
-# Apply patch to avoid re-downloading existing cubins
-COPY flashinfer_cache.patch .
+# FlashInfer #5240 reuses checksum-verified cubins from the cache mount below.
+COPY docker/build_flashinfer_jit_providers.sh /tmp/build_flashinfer_jit_providers.sh
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     --mount=type=cache,id=ccache,target=/root/.ccache \
     --mount=type=cache,id=cubins-cache,target=/workspace/flashinfer/flashinfer-cubin/flashinfer_cubin/cubins \
-    patch -p1 < flashinfer_cache.patch && \
     # flashinfer-python
     sed -i -e 's/license = "Apache-2.0"/license = { text = "Apache-2.0" }/' -e '/license-files/d' pyproject.toml && \
     "$FLASHINFER_BUILD_PYTHON" -c 'import filelock, packaging, requests, torch, tqdm' && \
@@ -241,7 +243,8 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
     # flashinfer-cubin
     cd flashinfer-cubin && uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # flashinfer-jit-cache
-    cd ../flashinfer-jit-cache && \
+    cd .. && bash /tmp/build_flashinfer_jit_providers.sh "$FLASHINFER_BUILD_PYTHON" /workspace/wheels && \
+    cd flashinfer-jit-cache && \
     uv build --python "$FLASHINFER_BUILD_PYTHON" --no-build-isolation --wheel . --out-dir=/workspace/wheels -v && \
     # dump git ref and target architecture in the wheels dir
     cd .. && \
@@ -525,6 +528,14 @@ RUN set -eux; \
 # the fix (idempotent); unknown partial source shapes fail the build.
 COPY docker/patch_vllm_*.py docker/pin_cutlass_dsl.py /tmp/vllm-patches/
 
+# TEMPORARY PATCH: vLLM PR #53007 / d29c88f162a3 chooses a large SWA
+# kernel block even when the backend cannot run the primary block unsplit.
+# On FlashInfer SM12x, 64 does not divide Qwen3.8's 1648-token page, so
+# DFlash2 pages become mostly padding. Preserve the PR's supported-primary
+# path and restore the smallest-block fallback. Remove once supported refs
+# contain an equivalent upstream fix; unexpected source layouts fail closed.
+RUN python3 /tmp/vllm-patches/patch_vllm_swa_block_size.py .
+
 # TEMPORARY PATCH: vLLM PR #53306 added a preliminary CUDA-graph memory
 # profiling capture, but only redirects the main graph manager and existing
 # wrappers to its throwaway pool. MTP and other autoregressive speculators own
@@ -630,6 +641,14 @@ RUN python3 /tmp/vllm-patches/patch_vllm_routed_experts_weight_shape.py .
 # reservations behind just before vLLM sizes and allocates KV cache blocks.
 RUN python3 /tmp/vllm-patches/patch_vllm_spark_kv_cache_cleanup.py .
 
+# TEMPORARY PATCH: local-inference-lab/vllm 3d5f2b04 exports temporary MoE
+# tuning tensors as PreparedCall.owners, which b12x retains in serving plans.
+# Keep the trial lifetime in call closures so KV profiling can reclaim them.
+RUN python3 /tmp/vllm-patches/patch_vllm_b12x_moe_tuning_memory.py .
+
+# WSL guest RAM does not describe CUDA's allocation budget on UMA devices.
+# Keep the fix in exported wheels as well as the runner below.
+RUN python3 /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py .
 
 # Prepare build requirements
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
@@ -686,6 +705,7 @@ ARG CUTLASS_DSL_VERSION
 ARG B12X_REPO
 ARG B12X_REF
 ARG B12X_CACHEBUST
+ARG B12X_FROM_PYPI
 
 # Transferring build settings from build image because of ptxas/jit compilation during vLLM startup
 # Build parallemism
@@ -781,6 +801,13 @@ ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 ENV TIKTOKEN_ENCODINGS_BASE=$VLLM_BASE_DIR/tiktoken_encodings
 ENV PATH=$VLLM_BASE_DIR:$PATH
+# Enable vLLM's WSL2 pinned-memory path; override with -e VLLM_WSL2_ENABLE_PIN_MEMORY=0.
+ENV VLLM_WSL2_ENABLE_PIN_MEMORY=1
+# Limit InstantTensor's in-flight I/O to reduce GPU and pinned host buffer usage.
+# Override per launch with -e INSTANTTENSOR_IO_DEPTH=<depth>.
+ENV INSTANTTENSOR_IO_DEPTH=16
+# TODO: Make the B12X autotuning default architecture dependent.
+# ENV B12X_AUTOTUNE=0
 
 
 # Final extra deps
@@ -799,9 +826,10 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         --override /tmp/torch-override.txt
 
 # Upstream vLLM and the local-inference-lab fork consume the external B12X
-# kernel package at runtime. Build B12X from its source repository but
-# install it without dependencies: vLLM already provides the runtime packages
-# and this image deliberately advances nvidia-cutlass-dsl to 4.7.0 for both
+# kernel package at runtime. Regular builds use the latest PyPI release;
+# experimental fork builds use source. Install without dependencies: vLLM
+# already provides the runtime packages, and this image deliberately advances
+# nvidia-cutlass-dsl to 4.7.0 for both
 # regular and B12X builds. B12X kernels remain JIT-compiled on first use;
 # building its Python wheel here does not compile the CUDA kernels.
 COPY docker/pin_cutlass_dsl.py /tmp/pin_cutlass_dsl.py
@@ -816,9 +844,28 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
         printf '%s\n' "$B12X_COMMIT" > /workspace/b12x-source-commit && \
         python3 -c "import importlib.metadata as m, sys; import b12x; print('Verified B12X', m.version('b12x'), 'from source commit', sys.argv[1], 'with CUTLASS DSL', m.version('nvidia-cutlass-dsl'))" "$B12X_COMMIT" && \
         rm -rf /tmp/b12x-source; \
+    elif [ "$B12X_FROM_PYPI" = "1" ]; then \
+        echo "Refreshing B12X from PyPI (cache key: $B12X_CACHEBUST)" && \
+        uv pip install --upgrade --refresh-package b12x --no-deps --index-url https://pypi.org/simple b12x && \
+        python3 -c "import importlib.metadata as m; import b12x; print('Verified B12X', m.version('b12x'), 'from PyPI with CUTLASS DSL', m.version('nvidia-cutlass-dsl'))"; \
     else \
-        echo "B12X source build not requested; skipping."; \
+        echo "B12X installation not requested; skipping."; \
     fi
+
+# Cached or downloaded wheels can predate the CUDA-on-WSL reporting fix.
+# This also accepts wheels that already contain the source-stage patch.
+COPY docker/patch_vllm_wsl_cuda_uma.py /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py
+RUN python3 /tmp/vllm-patches/patch_vllm_wsl_cuda_uma.py --installed
+
+# InstantTensor must share vLLM's available-memory accounting on native UMA
+# and WSL. Apply after all package installs for regular, B12X, and wheel runners.
+COPY docker/patch_instanttensor_vllm_memory.py /tmp/instanttensor-patches/patch_instanttensor_vllm_memory.py
+RUN python3 /tmp/instanttensor-patches/patch_instanttensor_vllm_memory.py --installed
+
+# Enumerate Torch schema arguments once per fill_defaults call. Apply after all
+# package installs so regular, B12X, and precompiled-wheel runners retain the fix.
+COPY docker/patch_torch_schema_enumeration.py /tmp/torch-patches/patch_torch_schema_enumeration.py
+RUN python3 /tmp/torch-patches/patch_torch_schema_enumeration.py --installed
 
 # Fix NCCL
 RUN rm /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 && \

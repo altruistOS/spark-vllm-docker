@@ -31,7 +31,7 @@ defaults:
   host: 0.0.0.0
   tensor_parallel: 2
   gpu_memory_utilization: 0.80
-  max_model_len: auto  # was 1048576 (~1M) — unbounded KV/activation growth on GB10 unified memory drained RAM during idle; matches eugr official vision-exp recipe
+  max_model_len: 1048576  # original feat/vision-exp value (was temporarily auto for idle-memory tuning)
   max_num_seqs: 6
   max_num_batched_tokens: 8192
   mtp_num_tokens: 6
@@ -109,7 +109,6 @@ command: |
     --limit-mm-per-prompt '{{"image":16}}' \
     --distributed-executor-backend mp \
     --moe-backend flashinfer_b12x \
-    --attention-backend flashinfer \
     --enable-flashinfer-autotune \
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \

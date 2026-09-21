@@ -49,7 +49,8 @@ HF=(hotfix-encoding-dsv4-issue21.py
     hotfix-vllm-rope-swa-fix.py
     hotfix-vllm-issue136-xgrammar-termination.py
     hotfix-vllm-issue191-toolcall-failclosed.py
-    hotfix-vllm-dspark-swa-prefix.py)
+    hotfix-vllm-dspark-swa-prefix.py
+    hotfix-vllm-dsml-recovery.py)
 
 # --- 1. Stage hotfix scripts into /opt ---------------------------------------
 for f in "${HF[@]}"; do
@@ -96,6 +97,15 @@ python3 /opt/hotfix-vllm-issue138-responses-history.py
 log "issue138 applied"
 python3 /opt/hotfix-vllm-codex-agent-message.py
 log "codex agent_message applied"
+
+# issue225: recover a complete DSML <invoke> whose outer tool_calls opener was
+# missing/corrupted, so it leaks verbatim into content/reasoning and the agent
+# loses the structured tool call (vLLM #52645 backport). Applied unconditionally
+# (eugr exports the recipe env block only on `exec vllm serve`, after this mod,
+# so the DSPARK_ENABLE_DSML_RECOVERY gate never reaches run.sh); the recipe sets
+# the gate to 1 and the patch is source-pinned/idempotent/fail-closed.
+python3 /opt/hotfix-vllm-dsml-recovery.py
+log "dsml-recovery applied"
 
 python3 /opt/hotfix-dsv4-issue27-partial-prefill-concurrency.py
 log "issue27 applied"

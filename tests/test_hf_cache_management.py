@@ -201,15 +201,24 @@ class CacheManagementTests(unittest.TestCase):
         (hook / "sitecustomize.py").write_text('''
 import errno
 import os
-from pathlib import Path
 
 original_symlink = os.symlink
 def limited_symlink(src, dst, *args, **kwargs):
-    if Path(dst).is_relative_to(os.environ["TEST_NO_SYMLINK_ROOT"]):
+    dst = os.path.abspath(os.fspath(dst))
+    root = os.path.abspath(os.environ["TEST_NO_SYMLINK_ROOT"])
+    if dst == root or dst.startswith(root + os.sep):
         code = getattr(errno, os.environ["TEST_SYMLINK_ERRNO"])
-        raise OSError(code, os.strerror(code), str(dst))
+        raise OSError(code, os.strerror(code), dst)
     return original_symlink(src, dst, *args, **kwargs)
 os.symlink = limited_symlink
+# Python 3.10's pathlib caches os.symlink in _NormalAccessor at import time, so
+# rebind that accessor after the patch; 3.11+ calls os.symlink directly.
+try:
+    import pathlib
+    if hasattr(pathlib, "_NormalAccessor"):
+        pathlib._NormalAccessor.symlink = staticmethod(limited_symlink)
+except ImportError:
+    pass
 ''')
         self.env["PYTHONPATH"] = str(hook)
         self.env["TEST_NO_SYMLINK_ROOT"] = str(self.backup)
